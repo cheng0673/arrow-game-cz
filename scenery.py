@@ -14,8 +14,8 @@
 * 底部扇贝形花边与上面的小花；
 * 白天的太阳（旋转柔光 + 呼吸光晕）与夜晚的月亮、星星。
 
-天色随 ``day_p``（0~1）在「早晨 → 中午 → 傍晚 → 夜晚」之间平滑变化，
-调用方按 30 秒一个周期传入即可。
+天色随 ``day_p``（0~1）在「早晨 → 中午 → 傍晚 → 夜晚 → 破晓」之间平滑变化，
+末段渐亮回早晨颜色，绕回时无缝衔接；调用方按 10 秒一个周期传入即可。
 对外只暴露 ``DreamScene.draw(surf, t, day_p)``。
 """
 import math
@@ -24,12 +24,15 @@ import random
 import pygame
 
 
-# 一天四个关键时刻的天空渐变色（上方色 / 下方色）
-_KEYFRAMES = [
-    ((255, 183, 150), (255, 226, 170)),    # 早晨：粉橘朝霞
-    ((102, 184, 234), (205, 239, 249)),    # 中午：参考图的明亮天蓝
-    ((255, 138, 88), (128, 92, 196)),      # 傍晚：橙紫晚霞
-    ((24, 28, 82), (66, 56, 126)),         # 夜晚：深蓝星空
+# 天色色标：(时刻 0~1, 天空顶部颜色, 天空底部颜色)
+# 末段「破晓」渐亮回早晨颜色，与 0.00 处相同，昼夜绕回时无缝衔接
+_SKY_STOPS = [
+    (0.00, (255, 183, 150), (255, 226, 170)),   # 早晨：粉橘朝霞
+    (0.30, (102, 184, 234), (205, 239, 249)),   # 中午：明亮天蓝
+    (0.55, (255, 138, 88), (128, 92, 196)),     # 傍晚：橙紫晚霞
+    (0.70, (24, 28, 82), (66, 56, 126)),        # 入夜：深蓝星空
+    (0.88, (24, 28, 82), (66, 56, 126)),        # 深夜：保持星空
+    (1.00, (255, 183, 150), (255, 226, 170)),   # 破晓：渐亮回朝霞
 ]
 
 # 草坡三个色标（远 / 中 / 近），夜晚向这些颜色压暗
@@ -140,6 +143,15 @@ class DreamScene:
                 rng.uniform(0, 6.28), rng.uniform(0.8, 1.8),
                 rng.uniform(-6, 6), rng.uniform(-1.6, 1.6), kind])
 
+        # 童趣小蝴蝶：花丛间飞舞
+        bcolors = ((255, 150, 190), (186, 158, 255), (255, 208, 92))
+        self.butterflies = []
+        for i in range(3):
+            self.butterflies.append((
+                rng.uniform(self.w * 0.12, self.w * 0.88),
+                rng.uniform(self.meadow_y + 40, self.h - 60),
+                rng.uniform(0, 6.28), bcolors[i]))
+
         # 闪烁星光：天空 / 草坡分开存放
         self.sky_sparks = []
         self.grass_sparks = []
@@ -161,6 +173,9 @@ class DreamScene:
         self._rainbow_cache = {}
         self._petal_cache = {}
         self._cloud_cache = {}
+        self._meadow_cache = {}
+        self._bubble_cache = {}
+        self._spark_cache = {}
         self._sun_glow = None
         self.layer = pygame.Surface((self.w, self.h), pygame.SRCALPHA)
 
@@ -171,38 +186,50 @@ class DreamScene:
         return v * v * (3 - 2 * v)
 
     def _night_weight(self, p):
-        # 傍晚 60% 处开始入夜，82% 处完全是夜晚
-        return self._smooth01((p - 0.60) / 0.22)
+        # 55% 处开始入夜，72% 完全入夜；88%~100% 破晓渐亮，绕回 p=0 时为 0，无缝衔接
+        rise = self._smooth01((p - 0.55) / 0.17)
+        fall = 1 - self._smooth01((p - 0.88) / 0.12)
+        return rise * fall
 
     def _dim(self, color, night, keep=0.45):
         """夜晚把鲜艳颜色压暗到 keep 左右。"""
         return _mix(color, _mix(color, (40, 46, 80), 0.75), night * keep)
 
     def _petal_shape(self, length, width, color, ang):
-        """按方向旋转的椭圆花瓣（小尺寸，量化缓存）。"""
+        """按方向旋转的双色花瓣（3 倍超采样，清晰且有立体感）。"""
         key = (int(round(length)), int(round(width)), color,
                int(round(math.degrees(ang) / 22.5)) % 16)
         s = self._petal_cache.get(key)
         if s is None:
             lw = max(int(length * 2) + 6, 6)
             ww = max(int(width * 2) + 6, 6)
-            base = pygame.Surface((lw, ww), pygame.SRCALPHA)
-            pygame.draw.ellipse(base, color, (3, 3, lw - 6, ww - 6))
-            # 一端加个小尖，让花瓣更像花瓣
-            tip = (lw - 2, ww // 2)
-            pygame.draw.polygon(base, color,
-                                [tip, (lw - 9, 2), (lw - 9, ww - 2)])
-            s = pygame.transform.rotate(base, -math.degrees(ang))
+            big = pygame.Surface((lw * 3, ww * 3), pygame.SRCALPHA)
+            rect = pygame.Rect(9, 9, lw * 3 - 18, ww * 3 - 18)
+            # 暗色底 + 亮色受光面，花瓣根深梢浅
+            dark = _mix(color, (95, 75, 125), 0.20)
+            light = _mix(color, (255, 255, 255), 0.42)
+            pygame.draw.ellipse(big, dark, rect)
+            hi = rect.inflate(-rect.w // 4, -rect.h // 2)
+            hi.topleft = (9 + rect.w // 5, 9 + rect.h // 10)
+            pygame.draw.ellipse(big, light, hi)
+            pygame.draw.polygon(big, light,
+                                [(lw * 3 - 4, ww * 3 // 2),
+                                 (lw * 3 - 27, 8), (lw * 3 - 27, ww * 3 - 8)])
+            s = pygame.transform.smoothscale(big, (lw, ww))
+            s = pygame.transform.rotate(s, -math.degrees(ang))
             if len(self._petal_cache) < 1400:
                 self._petal_cache[key] = s
         return s
 
     def _sky_colors(self, p):
-        pos = _clamp(p, 0, 1) * (len(_KEYFRAMES) - 1)
-        i = min(int(pos), len(_KEYFRAMES) - 2)
-        f = pos - i
-        return (_mix(_KEYFRAMES[i][0], _KEYFRAMES[i + 1][0], f),
-                _mix(_KEYFRAMES[i][1], _KEYFRAMES[i + 1][1], f))
+        pp = _clamp(p, 0, 1)
+        for i in range(len(_SKY_STOPS) - 1):
+            p0, top0, bot0 = _SKY_STOPS[i]
+            p1, top1, bot1 = _SKY_STOPS[i + 1]
+            if pp <= p1:
+                f = (pp - p0) / (p1 - p0)
+                return _mix(top0, top1, f), _mix(bot0, bot1, f)
+        return _SKY_STOPS[-1][1], _SKY_STOPS[-1][2]
 
     def _celestial(self, p):
         """太阳/月亮的中心位置与可见度（0~1）。"""
@@ -211,10 +238,17 @@ class DreamScene:
         mid_x = self.w * 0.5
         half_w = self.w * 0.42
 
+        # 太阳：白天 0~2/3 沿弧线移动；夜晚藏于左侧地平线，
+        # 破晓 0.94~1.0 在原地渐显，与 p=0 的位置完全一致，绕回无缝
         s = _clamp(p / (2 / 3), 0, 1)
-        sun = (mid_x - half_w + 2 * half_w * s,
-               horizon - math.sin(s * math.pi) * arc,
-               self._smooth01((0.72 - p) / 0.10))
+        if p >= 2 / 3:
+            sx, sy = mid_x - half_w, horizon
+        else:
+            sx, sy = (mid_x - half_w + 2 * half_w * s,
+                      horizon - math.sin(s * math.pi) * arc)
+        sun_vis = max(self._smooth01((0.72 - p) / 0.10),
+                      _clamp((p - 0.94) / 0.06, 0, 1))
+        sun = (sx, sy, sun_vis)
 
         m = _clamp((p - 2 / 3) / (1 / 3), 0, 1)
         moon = (mid_x - half_w + 2 * half_w * m,
@@ -299,6 +333,16 @@ class DreamScene:
                            (x, y), int(44 * u))
         pygame.draw.circle(layer, (255, 253, 232, int(255 * vis)),
                            (x, y), int(28 * u))
+        # 童趣笑脸：两道弯弯的眯眯眼 + 微笑弧（不透明插值色，随日落淡出）
+        ew = max(2, int(3 * u))
+        fc = _mix((255, 246, 206), (255, 190, 96), vis)
+        for sx in (-16, 16):
+            pygame.draw.arc(layer, fc,
+                            pygame.Rect(x + sx - 8, y - 13, 16, 12),
+                            math.radians(200), math.radians(340), ew)
+        pygame.draw.arc(layer, fc,
+                        pygame.Rect(x - 11, y + 1, 22, 13),
+                        math.radians(20), math.radians(160), ew)
 
     def _draw_moon(self, layer, x, y, vis, t):
         if vis <= 0:
@@ -349,7 +393,7 @@ class DreamScene:
 
     # ---------------- 云朵 ----------------
     def _build_cloud(self, sc):
-        """2 倍超采样绘制云团再缩回，得到边缘柔和、融合蓬松的白云。"""
+        """2 倍超采样绘制立体云团：暗部 / 主体 / 高光三层，光影分明。"""
         u = self.u
         wpx = int(300 * u * sc)
         hpx = int(150 * u * sc)
@@ -359,14 +403,27 @@ class DreamScene:
         cy = int(hpx * 1.44)
         # 底部一条柔和暖灰阴影
         pygame.draw.ellipse(
-            big, (222, 230, 244, 140),
+            big, (214, 223, 242, 150),
             (int(cx - 110 * k), int(cy + 6 * k),
              int(220 * k), int(30 * k)))
+        # 暗部：整体向右下偏移的蓝灰色云底
+        for dx, dy, r in _CLOUD_BLOBS:
+            pygame.draw.circle(
+                big, (203, 214, 240, 255),
+                (int(cx + (dx + 5) * k), int(cy + (dy + 6) * k)),
+                int(r * k))
+        # 主体：偏冷的云白
+        for dx, dy, r in _CLOUD_BLOBS:
+            pygame.draw.circle(
+                big, (247, 250, 255, 255),
+                (int(cx + dx * k), int(cy + dy * k)),
+                int(r * k))
+        # 高光：向左上偏移的纯白小云团，形成受光面
         for dx, dy, r in _CLOUD_BLOBS:
             pygame.draw.circle(
                 big, (255, 255, 255, 255),
-                (int(cx + dx * k), int(cy + dy * k)),
-                int(r * k))
+                (int(cx + (dx - 4) * k), int(cy + (dy - 5) * k)),
+                int(r * k * 0.82))
         return pygame.transform.smoothscale(big, (wpx, hpx))
 
     def _cloud_surface(self, sc, nkey):
@@ -413,37 +470,59 @@ class DreamScene:
                                  (int(prev[0]), int(prev[1])),
                                  (int(px), int(py)), 1)
                 prev = (px, py)
-            # 气球本体
+            # 气球本体：暗部椭圆垫底 + 主体左上偏移，形成球体明暗
             box = pygame.Rect(int(cx - rx), int(cy - ry), rx * 2, ry * 2)
-            pygame.draw.ellipse(layer, body_c, box)
+            dark_c = self._dim(_mix(color, (80, 70, 130), 0.30), night, 0.55)
+            pygame.draw.ellipse(layer, dark_c, box)
+            mbox = pygame.Rect(int(cx - rx + 2 * self.u),
+                               int(cy - ry - 2 * self.u),
+                               rx * 2 - 4 * self.u, ry * 2 - 4 * self.u)
+            pygame.draw.ellipse(layer, body_c, mbox)
             # 小三角结
-            pygame.draw.polygon(layer, body_c,
+            pygame.draw.polygon(layer, dark_c,
                                 [(cx - 5, cy + ry - 3),
                                  (cx + 5, cy + ry - 3),
                                  (cx, cy + ry + 5)])
-            # 高光
+            # 高光：柔光大椭圆 + 一个镜面小亮点
             hl = pygame.Surface((rx, ry), pygame.SRCALPHA)
-            pygame.draw.ellipse(hl, (255, 255, 255, 110),
+            pygame.draw.ellipse(hl, (255, 255, 255, 115),
                                 (2, 3, int(rx * 0.7), int(ry * 0.8)))
             layer.blit(hl, (int(cx - rx * 0.55), int(cy - ry * 0.55)))
+            pygame.draw.circle(layer, (255, 255, 255, 200),
+                               (int(cx - rx * 0.34), int(cy - ry * 0.44)),
+                               max(1, int(2.6 * self.u)))
 
     # ---------------- 草坡 ----------------
-    def _draw_meadow(self, layer, t, night):
+    def _build_meadow(self, key):
+        """草地渐变 + 坡顶圆边（按夜色量化缓存，省去每帧逐行绘制）。"""
+        night = key / 40
         top, mid, bot = (
             _mix(_GRASS_NIGHT[i], _GRASS_DAY[i], 1 - night * 0.72)
             for i in range(3))
-        # 渐变草坡
-        for y in range(self.meadow_y, self.h):
-            f = (y - self.meadow_y) / max(1, self.h - self.meadow_y)
+        mh = self.h - self.meadow_y
+        s = pygame.Surface((self.w, mh))
+        for y in range(mh):
+            f = y / max(1, mh - 1)
             if f < 0.5:
                 color = _mix(top, mid, f * 2)
             else:
                 color = _mix(mid, bot, (f - 0.5) * 2)
-            pygame.draw.line(layer, color, (0, y), (self.w, y))
+            pygame.draw.line(s, color, (0, y), (self.w, y))
         # 坡顶起伏的草丛圆边
         for x in range(-20, self.w + 30, int(26 * self.u)):
-            yy = self.meadow_y + 2 + int(math.sin(x * 0.7) * 2)
-            pygame.draw.circle(layer, top, (x, yy), int(15 * self.u))
+            yy = 2 + int(math.sin(x * 0.7) * 2)
+            pygame.draw.circle(s, top, (x, yy), int(15 * self.u))
+        if len(self._meadow_cache) > 66:
+            self._meadow_cache.clear()
+        self._meadow_cache[key] = s
+
+    def _draw_meadow(self, layer, t, night):
+        key = int(night * 40)
+        s = self._meadow_cache.get(key)
+        if s is None:
+            self._build_meadow(key)
+            s = self._meadow_cache[key]
+        layer.blit(s, (0, self.meadow_y))
         # 草叶纹理
         for x, y, length, tilt, light in self.blades:
             c = (170, 228, 120) if light else (86, 165, 82)
@@ -516,6 +595,24 @@ class DreamScene:
             pygame.draw.circle(layer, center, (hx, hy),
                                max(1, int(unit * 0.38)))
 
+    # ---------------- 童趣小蝴蝶 ----------------
+    def _draw_butterflies(self, layer, t, night):
+        for x0, y0, phase, color in self.butterflies:
+            x = x0 + math.sin(t * 0.33 + phase) * 80 * self.u
+            y = y0 + math.sin(t * 0.85 + phase * 2.1) * 40 * self.u
+            flap = abs(math.sin(t * 9 + phase))
+            c = self._dim(color, night, 0.5)
+            wx = 9 * self.u * (0.35 + 0.65 * flap)
+            wy = 8 * self.u
+            for s in (-1, 1):
+                box = pygame.Rect(0, 0, max(2, int(wx)), max(2, int(wy)))
+                box.center = (int(x + s * wx * 0.55), int(y))
+                pygame.draw.ellipse(layer, (*c, 235), box)
+            pygame.draw.line(layer, (90, 70, 110, 235),
+                             (int(x), int(y - 5 * self.u)),
+                             (int(x), int(y + 4 * self.u)),
+                             max(1, int(2 * self.u)))
+
     # ---------------- 扇贝花边 ----------------
     def _draw_scallops(self, layer, t, night):
         r = self.scallop_r
@@ -546,20 +643,40 @@ class DreamScene:
                                (x, yy), max(1, int(3 * self.u)))
 
     # ---------------- 泡泡 ----------------
+    def _bubble_sprite(self, r):
+        """泡泡精灵（半透明必须用 blit 合成，draw 会直接替换图层像素）。"""
+        key = max(3, int(round(r)))
+        s = self._bubble_cache.get(key)
+        if s is None:
+            size = key * 2 + 4
+            s = pygame.Surface((size, size), pygame.SRCALPHA)
+            c = size // 2
+            rad = math.radians
+            # 内部柔光填充
+            pygame.draw.circle(s, (208, 234, 255, 26), (c, c), key - 1)
+            pygame.draw.circle(s, (255, 255, 255, 95), (c, c), key, 2)
+            box = pygame.Rect(2, 2, key * 2, key * 2)
+            pygame.draw.arc(s, (255, 170, 210, 160), box,
+                            rad(200), rad(255), 2)
+            pygame.draw.arc(s, (150, 220, 255, 160), box,
+                            rad(25), rad(78), 2)
+            pygame.draw.arc(s, (140, 185, 255, 100), box,
+                            rad(115), rad(175), 2)
+            pygame.draw.circle(s, (255, 255, 255, 185),
+                               (int(c - key * 0.36), int(c - key * 0.4)),
+                               max(1, int(key * 0.18)))
+            pygame.draw.circle(s, (255, 255, 255, 120),
+                               (int(c + key * 0.32), int(c + key * 0.28)),
+                               max(1, int(key * 0.08)))
+            self._bubble_cache[key] = s
+        return s
+
     def _draw_bubbles(self, layer, t):
         for bx, by0, r, spd in self.bubbles:
             y = (by0 - spd * t) % (self.h + 100) - 50
             x = bx + math.sin(t * 1.1 + by0) * 18 * self.u
-            pygame.draw.circle(layer, (255, 255, 255, 70),
-                               (int(x), int(y)), int(r), 2)
-            box = pygame.Rect(int(x - r), int(y - r), int(r * 2), int(r * 2))
-            pygame.draw.arc(layer, (255, 170, 210, 150), box,
-                            math.radians(200), math.radians(255), 2)
-            pygame.draw.arc(layer, (150, 220, 255, 150), box,
-                            math.radians(25), math.radians(78), 2)
-            pygame.draw.circle(layer, (255, 255, 255, 180),
-                               (int(x - r * 0.36), int(y - r * 0.4)),
-                               max(1, int(r * 0.18)))
+            s = self._bubble_sprite(r)
+            layer.blit(s, s.get_rect(center=(int(x), int(y))))
 
     # ---------------- 飘落花瓣 ----------------
     def _falling_petal_surface(self, size, kind):
@@ -601,19 +718,28 @@ class DreamScene:
             layer.blit(s, s.get_rect(center=(int(x), int(y))))
 
     # ---------------- 星光闪烁 ----------------
+    def _spark_sprite(self, r):
+        """四角星光精灵（blit 合成，避免打穿云层）。"""
+        key = max(2, int(round(r * 2)))
+        s = self._spark_cache.get(key)
+        if s is None:
+            size = key * 2 + 4
+            s = pygame.Surface((size, size), pygame.SRCALPHA)
+            c = size / 2
+            pts = []
+            for i in range(8):
+                ang = -math.pi / 2 + i * math.pi / 4
+                rad = key / 2 if i % 2 == 0 else key * 0.11
+                pts.append((c + rad * math.cos(ang), c + rad * math.sin(ang)))
+            pygame.draw.polygon(s, (255, 255, 255, 220), pts)
+            self._spark_cache[key] = s
+        return s
+
     def _draw_sparks(self, layer, t, sparks):
         for x, y, r, phase in sparks:
             tw = 0.3 + 0.7 * abs(math.sin(t * 2.8 + phase))
-            a = int(220 * tw)
-            s = r * 1.7
-            pts = []
-            for i in range(4):
-                ang = -math.pi / 2 + i * math.pi / 2
-                pts.append((x + s * math.cos(ang), y + s * math.sin(ang)))
-                ang += math.pi / 4
-                pts.append((x + s * 0.22 * math.cos(ang),
-                            y + s * 0.22 * math.sin(ang)))
-            pygame.draw.polygon(layer, (255, 255, 255, a), pts)
+            s = self._spark_sprite(r * 1.7 * tw)
+            layer.blit(s, s.get_rect(center=(int(x), int(y))))
 
     # ---------------- 对外入口 ----------------
     def draw(self, surf, t, day_p):
@@ -636,6 +762,7 @@ class DreamScene:
         self._draw_sparks(layer, t, self.sky_sparks)
         self._draw_meadow(layer, t, night)
         self._draw_sparks(layer, t, self.grass_sparks)
+        self._draw_butterflies(layer, t, night)
         self._draw_balloons(layer, t, night)
         self._draw_petals(layer, t, night)
         self._draw_bubbles(layer, t)
