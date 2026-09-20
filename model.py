@@ -254,6 +254,50 @@ class GameSession:
         self.state = "lost"
         self.lose_reason = reason
 
+    # ---------- 关卡进度存档 ----------
+    def to_checkpoint(self) -> dict:
+        """把当前局面导出为可 JSON 序列化的存档（只保留可重建的确定性数据）。"""
+        return {
+            "arrows": [[a.row, a.col, a.direction.name] for a in self.board.arrows],
+            "time_left": round(self.time_left, 3),
+            "mistakes_left": self.mistakes_left,
+            "hints_left": self.hints_left,
+            "score": self.score,
+            "combo": self.combo,
+            "best_combo": self.best_combo,
+            "cleared": self.cleared,
+        }
+
+    @classmethod
+    def from_checkpoint(cls, level: dict, data: dict) -> "GameSession":
+        """
+        用关卡配置 level 与存档数据 data 重建一局游戏。
+
+        level 需含 rows / cols / time_limit / mistakes；
+        data 为 to_checkpoint() 的产物。数据损坏时抛出 KeyError / ValueError。
+        """
+        try:
+            arrows = [(int(r), int(c), Direction[str(d)])
+                      for r, c, d in data["arrows"]]
+            session = cls(
+                int(level["rows"]), int(level["cols"]), arrows,
+                time_limit=float(level["time_limit"]),
+                max_mistakes=int(level["mistakes"]),
+            )
+            session.time_left = max(0.0, float(data["time_left"]))
+            session.mistakes_left = int(data["mistakes_left"])
+            session.hints_left = int(data["hints_left"])
+            session.score = int(data["score"])
+            session.combo = int(data["combo"])
+            session.best_combo = int(data["best_combo"])
+            session.cleared = int(data["cleared"])
+        except (KeyError, TypeError) as exc:
+            raise ValueError(f"关卡进度存档格式无效: {exc}") from exc
+        if (session.state != "playing" or session.mistakes_left <= 0
+                or session.time_left <= 0):
+            raise ValueError("关卡进度存档不是有效的进行中局面")
+        return session
+
     # ---------- 星级 ----------
     def stars(self) -> int:
         """通关星级：满失误（一次没撞）3 星，最多失误 1 次 2 星，其余 1 星。"""

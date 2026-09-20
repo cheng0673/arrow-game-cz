@@ -15,6 +15,7 @@ import math
 import os
 import random
 import sys
+from datetime import datetime
 
 import pygame
 
@@ -61,6 +62,33 @@ BUTTON_STYLE = {
 
 
 # ============================== 工具函数 ==============================
+def level_to_data(level):
+    """把关卡 dict 转为可 JSON 保存的结构（随机模式每次布局不同，必须整局保存）。"""
+    return {
+        "name": level.get("name", ""),
+        "rows": level["rows"],
+        "cols": level["cols"],
+        "time_limit": level["time_limit"],
+        "mistakes": level["mistakes"],
+        "arrows": [[r, c, d.name] for r, c, d in level["arrows"]],
+        "random": bool(level.get("random", False)),
+    }
+
+
+def level_from_data(data):
+    """level_to_data 的逆操作，还原出关卡 dict。"""
+    return {
+        "name": data.get("name", "随机挑战"),
+        "rows": int(data["rows"]),
+        "cols": int(data["cols"]),
+        "time_limit": float(data["time_limit"]),
+        "mistakes": int(data["mistakes"]),
+        "arrows": [(int(r), int(c), Direction[str(d)])
+                   for r, c, d in data["arrows"]],
+        "random": bool(data.get("random", False)),
+    }
+
+
 def lerp(a, b, t):
     return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
 
@@ -688,7 +716,7 @@ class PlayState:
     FLY_TIME = 0.38
     HIT_TIME = 0.45
 
-    def __init__(self, app, level, level_index=-1, seq=0):
+    def __init__(self, app, level, level_index=-1, seq=0, checkpoint=None):
         self.app = app
         self.level = level
         self.level_index = level_index  # -1 表示随机模式
@@ -719,6 +747,15 @@ class PlayState:
         self.confetti_t = 0.0
         self.ended_sound = False
         self.paused = False
+        # 进入关卡时若有中途存档，先挂起游戏并弹出询问
+        self.ask_restore = None
+        if checkpoint is not None:
+            try:
+                GameSession.from_checkpoint(level, checkpoint["data"])
+                self.ask_restore = checkpoint
+            except Exception:
+                # 存档损坏：直接丢弃，按新局开始
+                self.app.clear_checkpoint(self.cp_key())
 
         btn_y = 168
         self.btn_hint = Button((24, btn_y, 128, 48), f"提示 {self.session.hints_left}",
@@ -735,6 +772,11 @@ class PlayState:
         self.btn_next = Button((0, 0, 220, 62), "下一关", "pink", 26)
         self.btn_replay = Button((0, 0, 200, 62), "再来一次", "mint", 24)
         self.btn_menu_r = Button((0, 0, 200, 62), "返回菜单", "gray", 24)
+        # 「是否回到上次进度」询问弹窗按钮
+        self.btn_restore_yes = Button((0, 0, 228, 64), "是，继续进度",
+                                      "mint", 24, "play")
+        self.btn_restore_no = Button((0, 0, 228, 64), "否，重新开始",
+                                     "gray", 24)
 
     # ---------- 工具 ----------
     def cell_rect(self, r, c, scale=1.0):
@@ -755,9 +797,63 @@ class PlayState:
     def busy(self):
         return bool(self.flying) or bool(self.hits)
 
+    # ---------- 关卡进度保存 / 恢复 ----------
+    def cp_key(self):
+        return self.app.checkpoint_key(self.level_index, self.seq)
+
+    def has_mid_progress(self):
+        """局面确实离开过初始状态时才有保存价值。"""
+        s = self.session
+        return (s.state == "playing"
+                and (s.cleared > 0 or s.mistakes_left < s.max_mistakes
+                     or s.hints_left < s.max_hints))
+
+    def save_and_menu(self):
+        """中途退出：自动保存当前进度后返回主菜单。"""
+        if self.has_mid_progress():
+            self.app.save_checkpoint(self.cp_key(), self.level, self.session)
+        self.app.go_menu()
+
+    def _accept_restore(self):
+        """选择“是”：用存档局面替换当前新局。"""
+        try:
+            self.session = GameSession.from_checkpoint(
+                self.level, self.ask_restore["data"])
+        except Exception:
+            self.app.clear_checkpoint(self.cp_key())
+            self.ask_restore = None
+            return
+        self.ask_restore = None
+        self.btn_hint.text = f"提示 {self.session.hints_left}"
+
+    def _decline_restore(self):
+        """选择“否”：废弃存档。固定关卡保持新局；随机模式另开一把全新随机。"""
+        is_random = self.level_index < 0
+        self.app.clear_checkpoint(self.cp_key())
+        self.ask_restore = None
+        if is_random:
+            self.app.start_random(0)
+
     # ---------- 事件 ----------
     def handle_event(self, event):
         s = self.app.sounds
+
+        # 恢复进度询问挂起时，只响应询问弹窗，其余操作全部冻结
+        if self.ask_restore is not None:
+            ask_buttons = (self.btn_restore_yes, self.btn_restore_no)
+            if event.type == pygame.MOUSEMOTION:
+                for b in ask_buttons:
+                    b.hover = b.enabled and b.rect.collidepoint(event.pos)
+                return
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if self.btn_restore_yes.rect.collidepoint(event.pos):
+                    s.play("click")
+                    self._accept_restore()
+                elif self.btn_restore_no.rect.collidepoint(event.pos):
+                    s.play("click")
+                    self._decline_restore()
+            return
+
         hud_buttons = (self.btn_hint, self.btn_undo, self.btn_pause, self.btn_home)
         if self.paused:
             overlay = (self.btn_resume, self.btn_restart_p, self.btn_menu_p)
@@ -794,7 +890,7 @@ class PlayState:
                 self.app.restart_play(self.level, self.level_index, self.seq)
             elif self.btn_menu_p.rect.collidepoint(event.pos):
                 s.play("click")
-                self.app.go_menu()
+                self.save_and_menu()
             return
 
         if self.session.state != "playing":
@@ -817,7 +913,7 @@ class PlayState:
             return
         if self.btn_home.rect.collidepoint(event.pos):
             s.play("click")
-            self.app.go_menu()
+            self.save_and_menu()
             return
         if self.busy():
             return
@@ -898,7 +994,7 @@ class PlayState:
     # ---------- 更新 ----------
     def update(self, dt):
         s = self.app.sounds
-        if self.paused:
+        if self.paused or self.ask_restore is not None:
             return
         self.t += dt
         self.session.update(dt)
@@ -941,6 +1037,8 @@ class PlayState:
 
         # 胜负
         if self.session.state != "playing":
+            # 关卡已结束，中途进度存档不再有意义（仅当存在时写盘一次）
+            self.app.clear_checkpoint(self.cp_key())
             self.result_delay += dt
             if not self.ended_sound and self.result_delay > 0.4:
                 s.play("win" if self.session.state == "won" else "lose")
@@ -995,7 +1093,9 @@ class PlayState:
             pygame.draw.rect(vign, (230, 40, 60, pulse), (WIDTH - 30, 0, 30, HEIGHT))
             surf.blit(vign, (0, 0))
 
-        if self.paused:
+        if self.ask_restore is not None:
+            self._draw_restore_ask(surf, dt)
+        elif self.paused:
             self._draw_pause(surf, dt)
         elif self.session.state != "playing" and self.result_delay > 0.6:
             self._draw_result(surf, dt)
@@ -1132,6 +1232,28 @@ class PlayState:
         d = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
         d.fill((70, 50, 110, alpha))
         surf.blit(d, (0, 0))
+
+    def _draw_restore_ask(self, surf, dt):
+        """“是否选择回到上次进度”询问弹窗。"""
+        self._dim(surf)
+        panel = jelly_surface(560, 340, (255, 255, 255), (236, 242, 255),
+                              radius=32, shadow=12)
+        pr = panel.get_rect(center=(WIDTH // 2, HEIGHT // 2))
+        surf.blit(panel, pr)
+
+        title = get_font(30).render("是否选择回到上次进度？", True, INK)
+        surf.blit(title, title.get_rect(center=(WIDTH // 2, pr.top + 78)))
+        tip1 = get_font(20).render("检测到本关存在中途退出时自动保存的局面",
+                                   True, (120, 112, 150))
+        surf.blit(tip1, tip1.get_rect(center=(WIDTH // 2, pr.top + 132)))
+        tip2 = get_font(20).render("“是”将回到上次进度，“否”则重新开始",
+                                   True, (120, 112, 150))
+        surf.blit(tip2, tip2.get_rect(center=(WIDTH // 2, pr.top + 168)))
+
+        self.btn_restore_yes.rect.center = (WIDTH // 2 - 132, pr.top + 256)
+        self.btn_restore_no.rect.center = (WIDTH // 2 + 132, pr.top + 256)
+        self.btn_restore_yes.draw(surf, dt)
+        self.btn_restore_no.draw(surf, dt)
 
     def _draw_pause(self, surf, dt):
         self._dim(surf)
@@ -1298,7 +1420,8 @@ class App:
             with open(SAVE_PATH, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
-            return {"unlocked": 1, "stars": {}, "best": {}, "muted": False}
+            return {"unlocked": 1, "stars": {}, "best": {},
+                    "muted": False, "checkpoints": {}}
 
     def _write_save(self):
         try:
@@ -1317,20 +1440,58 @@ class App:
                                     min(index + 2, len(self.levels)))
         self._write_save()
 
+    # ---------- 关卡进度存档 ----------
+    def checkpoint_key(self, level_index, seq=0):
+        """固定关卡用序号，随机模式统一用 'random'（只保留最近一局）。"""
+        return "random" if level_index < 0 else str(level_index)
+
+    def get_checkpoint(self, key):
+        return self.save.get("checkpoints", {}).get(key)
+
+    def save_checkpoint(self, key, level, session):
+        checkpoints = self.save.setdefault("checkpoints", {})
+        checkpoints[key] = {
+            "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "level": level_to_data(level),
+            "data": session.to_checkpoint(),
+        }
+        self._write_save()
+
+    def clear_checkpoint(self, key):
+        checkpoints = self.save.get("checkpoints", {})
+        if key in checkpoints:
+            del checkpoints[key]
+            self._write_save()
+
     # ---------- 场景跳转 ----------
     def start_level(self, index):
         if index >= len(self.levels):
             self.go_select()
             return
-        self.play = PlayState(self, self.levels[index], level_index=index)
+        checkpoint = self.get_checkpoint(str(index))
+        self.play = PlayState(self, self.levels[index], level_index=index,
+                              checkpoint=checkpoint)
         self.scene = "play"
 
     def start_random(self, seq=0):
+        checkpoint = self.get_checkpoint("random")
+        if checkpoint is not None:
+            try:
+                level = level_from_data(checkpoint["level"])
+                self.play = PlayState(self, level, level_index=-1, seq=seq,
+                                      checkpoint=checkpoint)
+                self.scene = "play"
+                return
+            except Exception:
+                # 保存的关卡布局损坏：丢弃后按全新随机处理
+                self.clear_checkpoint("random")
         level = make_random_level(seq)
         self.play = PlayState(self, level, level_index=-1, seq=seq)
         self.scene = "play"
 
     def restart_play(self, level, index, seq):
+        # 主动选择“重新开始”：旧进度立即作废，避免再次弹询问
+        self.clear_checkpoint(self.checkpoint_key(index, seq))
         if index < 0:
             self.start_random(seq)
         else:

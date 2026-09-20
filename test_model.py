@@ -192,5 +192,50 @@ class TestLevels(unittest.TestCase):
         self.assertLess(time.time() - t0, 3.0)
 
 
+class TestCheckpoint(unittest.TestCase):
+    """关卡中途进度存档的序列化 / 反序列化。"""
+
+    def test_roundtrip_restores_progress(self):
+        level = all_levels()[1]
+        s = GameSession(level["rows"], level["cols"], level["arrows"],
+                        time_limit=level["time_limit"],
+                        max_mistakes=level["mistakes"])
+        # 按求解器点掉两支箭，并流逝一些时间，制造中途局面
+        sol = solve(level["rows"], level["cols"], level["arrows"])
+        s.click(*sol[0][:2])
+        s.click(*sol[1][:2])
+        s.update(6.5)
+
+        restored = GameSession.from_checkpoint(level, s.to_checkpoint())
+
+        self.assertEqual(restored.state, "playing")
+        self.assertEqual(restored.cleared, s.cleared)
+        self.assertEqual(restored.score, s.score)
+        self.assertEqual(restored.combo, s.combo)
+        self.assertEqual(restored.mistakes_left, s.mistakes_left)
+        self.assertEqual(restored.hints_left, s.hints_left)
+        self.assertAlmostEqual(restored.time_left, s.time_left, places=2)
+        alive_before = sorted((a.row, a.col, a.direction) for a in s.board.arrows)
+        alive_after = sorted((a.row, a.col, a.direction)
+                             for a in restored.board.arrows)
+        self.assertEqual(alive_after, alive_before)
+
+    def test_corrupt_checkpoint_raises(self):
+        level = {"rows": 4, "cols": 4, "time_limit": 90, "mistakes": 3}
+        bad_data = {"arrows": [["x", "y", "NOPE"]]}
+        with self.assertRaises((KeyError, ValueError)):
+            GameSession.from_checkpoint(level, bad_data)
+
+    def test_finished_session_not_restorable(self):
+        # 局面已经失败（失误次数为 0）时不允许作为进度恢复
+        s = session_from_layout(TestSession.LAYOUT)
+        s.mistakes_left = 0
+        s.state = "lost"
+        level = {"rows": s.rows, "cols": s.cols,
+                 "time_limit": 90, "mistakes": 3}
+        with self.assertRaises(ValueError):
+            GameSession.from_checkpoint(level, s.to_checkpoint())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
