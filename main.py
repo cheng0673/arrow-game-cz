@@ -19,7 +19,18 @@ from datetime import datetime
 
 import pygame
 
-from levels import all_levels, build_difficulty_level, make_random_level
+from levels import (all_levels, all_shape_levels, build_difficulty_level,
+                     build_shape_level, make_random_level)
+
+# 三个棋盘主题：默认矩形关卡 / 水果异形 / 动物异形
+THEME_DEFAULT = "default"
+THEME_FRUIT = "fruit"
+THEME_ANIMAL = "animal"
+THEME_LABELS = {
+    THEME_DEFAULT: "默认棋盘",
+    THEME_FRUIT: "水果乐园",
+    THEME_ANIMAL: "动物世界",
+}
 from model import CLICK_BLOCKED, CLICK_FLY, Direction, GameSession
 from scenery import DreamScene
 from sounds import SoundManager
@@ -94,12 +105,15 @@ def level_to_data(level):
         "mistakes": level["mistakes"],
         "arrows": [[r, c, d.name] for r, c, d in level["arrows"]],
         "random": bool(level.get("random", False)),
+        "mask": level.get("mask"),
+        "shape_index": level.get("shape_index"),
+        "shape_kind": level.get("shape_kind"),
     }
 
 
 def level_from_data(data):
     """level_to_data 的逆操作，还原出关卡 dict。"""
-    return {
+    level = {
         "name": data.get("name", "随机挑战"),
         "rows": int(data["rows"]),
         "cols": int(data["cols"]),
@@ -109,6 +123,13 @@ def level_from_data(data):
                    for r, c, d in data["arrows"]],
         "random": bool(data.get("random", False)),
     }
+    if data.get("mask"):
+        level["mask"] = data["mask"]  # 每项 [r, c, [R,G,B]]，已是可用结构
+    if data.get("shape_index") is not None:
+        level["shape_index"] = int(data["shape_index"])
+    if data.get("shape_kind"):
+        level["shape_kind"] = data["shape_kind"]
+    return level
 
 
 def lerp(a, b, t):
@@ -182,6 +203,28 @@ def jelly_surface(w, h, top, bottom, radius=24, shadow=6, gloss=True, outline=No
         pygame.draw.rect(surf, outline, (0, 0, w, h), 3, border_radius=radius)
     _surf_cache[key] = surf
     return surf
+
+
+def blit_pixel_preview(surf, cells, centerx, top_y, max_w, max_h):
+    """
+    在指定区域内居中绘制像素画图案（cells: [[r, c, [R,G,B]], ...]）。
+    按图案实际包围盒计算，保证形状居中。
+    """
+    rs = [e[0] for e in cells]
+    cs = [e[1] for e in cells]
+    minr, maxr, minc, maxc = min(rs), max(rs), min(cs), max(cs)
+    nr, nc = maxr - minr + 1, maxc - minc + 1
+    cell = max(4, min(max_w // nc, max_h // nr))
+    px = centerx - cell * nc // 2 - minc * cell
+    py = top_y - minr * cell
+    for r, c, color in cells:
+        rct = pygame.Rect(px + c * cell, py + r * cell, cell - 1, cell - 1)
+        top = tuple(min(255, ch + 20) for ch in color)
+        bottom = tuple(max(0, ch - 20) for ch in color)
+        mini = jelly_surface(rct.w, rct.h, top, bottom,
+                             radius=max(2, cell // 5), shadow=0, gloss=False,
+                             outline=lerp(color, (70, 50, 90), 0.55))
+        surf.blit(mini, rct)
 
 
 _arrow_cache: dict = {}
@@ -893,12 +936,34 @@ class PlayState:
             level["rows"], level["cols"], level["arrows"],
             time_limit=level["time_limit"], max_mistakes=level["mistakes"])
         rows, cols = level["rows"], level["cols"]
+        # 像素画棋盘：mask 每项 [r, c, 颜色]；普通矩形棋盘 mask=None
+        if level.get("mask"):
+            self.tile_colors = {(int(m[0]), int(m[1])): tuple(m[2])
+                                for m in level["mask"]}
+            self.mask = set(self.tile_colors)
+        else:
+            self.tile_colors = None
+            self.mask = None
+        self.shape_kind = level.get("shape_kind")    # "fruit" / "animal" / None
         board_w_max = WIDTH - 48
         board_h_max = HEIGHT - 250
-        self.cell = int(min(board_w_max / cols, board_h_max / rows))
-        bw, bh = self.cell * cols, self.cell * rows
-        self.ox = (WIDTH - bw) // 2
-        self.oy = 232 + (board_h_max - bh) // 2
+        if self.mask is not None:
+            # 按形状实际包围盒确定格子尺寸与偏移，保证异形棋盘在屏幕上居中
+            mr = [r for r, _ in self.mask]
+            mc = [c for _, c in self.mask]
+            minr, maxr, minc, maxc = min(mr), max(mr), min(mc), max(mc)
+            shape_rows = maxr - minr + 1
+            shape_cols = maxc - minc + 1
+            self.cell = int(min(board_w_max / shape_cols,
+                                board_h_max / shape_rows))
+            self.ox = (WIDTH - self.cell * shape_cols) // 2 - minc * self.cell
+            self.oy = (232 + (board_h_max - self.cell * shape_rows) // 2
+                       - minr * self.cell)
+        else:
+            self.cell = int(min(board_w_max / cols, board_h_max / rows))
+            bw, bh = self.cell * cols, self.cell * rows
+            self.ox = (WIDTH - bw) // 2
+            self.oy = 232 + (board_h_max - bh) // 2
         self.t = 0.0
         self.shake = 0.0
         self.flying = []       # dict(arrow, surf, x,y, trail, dist)
@@ -968,7 +1033,8 @@ class PlayState:
 
     # ---------- 关卡进度保存 / 恢复 ----------
     def cp_key(self):
-        return self.app.checkpoint_key(self.level_index, self.seq, self.diff)
+        return self.app.checkpoint_key(self.level_index, self.seq, self.diff,
+                                       theme=self.shape_kind)
 
     def has_mid_progress(self):
         """局面确实离开过初始状态时才有保存价值。"""
@@ -1229,9 +1295,10 @@ class PlayState:
                     self._rain_one()
                 if self.result_delay > 0.8 and self.level_index >= 0 and not self.saved:
                     self.saved = True
-                    self.app.save_result(f"{self.level_index}:{self.diff}",
-                                         self.level_index, self.session.stars(),
-                                         self.session.score)
+                    key = self.app.checkpoint_key(self.level_index, self.seq,
+                                                  self.diff, theme=self.shape_kind)
+                    self.app.save_result(key, self.level_index,
+                                         self.session.stars(), self.session.score)
 
     def _rain_one(self):
         x = random.uniform(40, WIDTH - 40)
@@ -1328,25 +1395,41 @@ class PlayState:
         hover_cell = None
         if self.session.state == "playing" and not self.busy():
             hover_cell = self.cell_at(mouse) or (-1, -1)
-        # 棋盘底板
-        bw = self.cell * cols + 26
-        bh = self.cell * rows + 26
-        board_bg = jelly_surface(bw, bh, (255, 255, 255), (225, 235, 252),
-                                 radius=30, shadow=10, gloss=True)
-        surf.blit(board_bg, (self.ox - 13, self.oy - 13))
+        # 棋盘底板（异形棋盘只在形状轮廓内画格子，不画整块大白底）
+        if self.mask is None:
+            bw = self.cell * cols + 26
+            bh = self.cell * rows + 26
+            board_bg = jelly_surface(bw, bh, (255, 255, 255), (225, 235, 252),
+                                     radius=30, shadow=10, gloss=True)
+            surf.blit(board_bg, (self.ox - 13, self.oy - 13))
 
         pop_t = self.t
-        for r in range(rows):
-            for c in range(cols):
+        if self.tile_colors is not None:
+            # 像素画棋盘：逐格按图案颜色渲染
+            for (r, c), color in self.tile_colors.items():
                 delay = 0.025 * (r + c)
                 k = min(1, max(0, (pop_t - delay) / 0.3))
-                scale = round(ease_out_back(k) * 25) / 25  # 量化，避免缓存爆炸
+                scale = round(ease_out_back(k) * 25) / 25
                 rect = self.cell_rect(r, c, scale=scale)
-                tint = ((245, 249, 255) if (r + c) % 2 == 0 else (232, 240, 252))
-                tile = jelly_surface(rect.w, rect.h, (255, 255, 255), tint,
-                                     radius=max(10, rect.w // 6), shadow=4,
-                                     gloss=True, outline=(214, 226, 248))
-                surf.blit(tile, (rect.x, rect.y - 3))
+                top = tuple(min(255, ch + 26) for ch in color)
+                bottom = tuple(max(0, ch - 26) for ch in color)
+                tile = jelly_surface(rect.w, rect.h, top, bottom,
+                                     radius=max(8, rect.w // 7), shadow=3,
+                                     gloss=True,
+                                     outline=lerp(color, (70, 50, 90), 0.5))
+                surf.blit(tile, (rect.x, rect.y - 2))
+        else:
+            for r in range(rows):
+                for c in range(cols):
+                    delay = 0.025 * (r + c)
+                    k = min(1, max(0, (pop_t - delay) / 0.3))
+                    scale = round(ease_out_back(k) * 25) / 25
+                    rect = self.cell_rect(r, c, scale=scale)
+                    tint = ((245, 249, 255) if (r + c) % 2 == 0 else (232, 240, 252))
+                    tile = jelly_surface(rect.w, rect.h, (255, 255, 255), tint,
+                                         radius=max(10, rect.w // 6), shadow=4,
+                                         gloss=True, outline=(214, 226, 248))
+                    surf.blit(tile, (rect.x, rect.y - 3))
 
         # 消除扩散圈
         for r, c, p in self.rings:
@@ -1500,8 +1583,12 @@ class PlayState:
                 True, (130, 120, 160))
             surf.blit(combo, combo.get_rect(center=(WIDTH // 2, pr.top + 414)))
             btns = [self.btn_next, self.btn_replay, self.btn_menu_r]
-            has_next = (self.level_index >= 0 and self.level_index + 1 < len(self.app.levels)) \
-                or self.level_index < 0
+            if self.shape_kind is not None:
+                total = 6  # 水果 / 动物主题各 6 关
+                has_next = self.level_index + 1 < total
+            else:
+                has_next = (self.level_index >= 0 and self.level_index + 1 < len(self.app.levels)) \
+                    or self.level_index < 0
             self.btn_next.enabled = has_next
         else:
             # 竖大拇指的可爱小猫咪（轻轻上下浮动）
@@ -1542,6 +1629,9 @@ class PlayState:
                 s.play("click")
                 if self.level_index < 0:
                     self.app.start_random(self.seq + 1, self.timed)
+                elif self.shape_kind is not None:
+                    self.app.start_shape_level(self.shape_kind,
+                                              self.level_index + 1, self.diff)
                 else:
                     self.app.start_level(self.level_index + 1, self.diff)
                 return
@@ -1587,22 +1677,51 @@ class App:
         self.sounds = SoundManager()
         self.bg = DreamScene(WIDTH, HEIGHT)
         self.levels = all_levels()
+        self._theme_meta = {}   # 懒加载：fruit/animal 形状元数据
         self.save = self._load_save()
         self.sounds.set_master(float(self.save.get("volume", 1.0)))
         if self.save.get("muted"):
             self.sounds.muted = True
-        self.scene = "menu"
         self.play: PlayState | None = None
         self.t = 0.0
         self.mouse = (0, 0)
         self.timed_mode = None   # 当前限时挑战秒数（随机模式用）
-        self._level_cache = {}   # (关卡序号, 难度) -> 关卡数据
+        self._level_cache = {}   # (主题, 关卡序号, 难度) -> 关卡数据
+        self.cur_theme = THEME_DEFAULT
         self._build_menu_ui()
         self._build_help_ui()
+        self._build_theme_ui()
         self._build_select_ui()
         self._build_pick_ui()
         self._build_settings_ui()
+        self._build_boot_ui()
         self.btn_mute = Button((WIDTH - 92, 24, 68, 48), "", "purple", 20)
+        # 有历史进度时启动先询问「继续 / 从头开始」，否则直接进主菜单
+        self.scene = "boot" if self._has_progress() else "menu"
+
+    def theme_meta(self, theme):
+        """获取水果/动物主题的形状元数据（懒加载缓存）。"""
+        if theme not in self._theme_meta:
+            self._theme_meta[theme] = all_shape_levels(theme)
+        return self._theme_meta[theme]
+
+    def _has_progress(self):
+        """存档中是否存在值得询问的历史进度。"""
+        return bool(self.save.get("stars")) or self.save.get("unlocked", 1) > 1 \
+            or self.save.get("fruit_unlocked", 1) > 1 \
+            or self.save.get("animal_unlocked", 1) > 1 \
+            or bool(self.save.get("checkpoints"))
+
+    def reset_progress(self):
+        """初始化从头开始：清空全部成绩与中途存档（保留音量等偏好设置）。"""
+        prefs = {k: self.save.get(k) for k in ("volume", "muted",
+                                               "arrow_colors", "faces")}
+        self.save = self._default_save()
+        for k, v in prefs.items():
+            if v is not None:
+                self.save[k] = v
+        self._write_save()
+        self._level_cache = {}
 
     # ---------- 个性化设置读取 ----------
     # 方向 -> 存档键名
@@ -1624,17 +1743,24 @@ class App:
         return DIRECTION_FACE[direction] if f == "classic" else f
 
     # ---------- 存档 ----------
+    def _default_save(self):
+        return {"unlocked": 1, "fruit_unlocked": 1, "animal_unlocked": 1,
+                "stars": {}, "best": {}, "muted": False,
+                "checkpoints": {}, "volume": 1.0,
+                "arrow_colors": {"up": 0, "down": 0, "left": 0, "right": 0},
+                "faces": {"up": "classic", "down": "classic",
+                          "left": "classic", "right": "classic"}}
+
     def _load_save(self):
         try:
             with open(SAVE_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception:
-            return {"unlocked": 1, "stars": {}, "best": {}, "muted": False,
-                    "checkpoints": {}, "volume": 1.0,
-                    "arrow_colors": {"up": 0, "down": 0, "left": 0, "right": 0},
-                    "faces": {"up": "classic", "down": "classic",
-                              "left": "classic", "right": "classic"}}
+            return self._default_save()
         data.setdefault("unlocked", 1)
+        data.setdefault("fruit_unlocked", 1)
+        data.setdefault("animal_unlocked", 1)
+        data.pop("shape_unlocked", None)  # 旧版异形解锁键已废弃
         data.setdefault("stars", {})
         data.setdefault("best", {})
         data.setdefault("muted", False)
@@ -1658,6 +1784,10 @@ class App:
             data["best"][nk] = max(data["best"].pop(k), data["best"].get(nk, 0))
         for k in [k for k in data["checkpoints"] if k.isdigit()]:
             del data["checkpoints"][k]
+        # 水果/动物像素画历经改版，旧中途存档的棋盘布局与新版不匹配，
+        # 统一丢弃（星级/解锁不受影响）
+        for k in [k for k in data["checkpoints"] if k.startswith(("f_", "a_"))]:
+            del data["checkpoints"][k]
         return data
 
     def _write_save(self):
@@ -1668,21 +1798,31 @@ class App:
             pass
 
     def save_result(self, key, index, stars, score):
-        """key 形如 '2:1'（第 3 关·中等）。星级/最佳按难度分别记录。"""
+        """
+        key 形如 '2:1'（默认第3关·中等）、'f_2:1'（水果第3个·中等）、
+        'a_2:1'（动物第3个·中等）。三个主题的星级/解锁各自独立。
+        """
         if stars > self.save["stars"].get(key, 0):
             self.save["stars"][key] = stars
         if score > self.save["best"].get(key, 0):
             self.save["best"][key] = score
-        self.save["unlocked"] = max(self.save["unlocked"],
-                                    min(index + 2, len(self.levels)))
+        nxt = min(index + 2, 6)
+        if key.startswith("f_"):
+            self.save["fruit_unlocked"] = max(self.save.get("fruit_unlocked", 1), nxt)
+        elif key.startswith("a_"):
+            self.save["animal_unlocked"] = max(self.save.get("animal_unlocked", 1), nxt)
+        else:
+            self.save["unlocked"] = max(self.save["unlocked"],
+                                        min(index + 2, len(self.levels)))
         self._write_save()
 
     # ---------- 关卡进度存档 ----------
-    def checkpoint_key(self, level_index, seq=0, diff=0):
-        """固定关卡用 '序号:难度'，随机模式按时限区分（只保留最近一局）。"""
+    def checkpoint_key(self, level_index, seq=0, diff=0, theme=None):
+        """默认关卡 '序号:难度'，水果 'f_序号:难度'，动物 'a_序号:难度'；随机按时限。"""
         if level_index < 0:
             return "random" if self.timed_mode is None else f"random:{self.timed_mode}"
-        return f"{level_index}:{diff}"
+        prefix = {"fruit": "f_", "animal": "a_"}.get(theme, "")
+        return f"{prefix}{level_index}:{diff}"
 
     def get_checkpoint(self, key):
         return self.save.get("checkpoints", {}).get(key)
@@ -1711,11 +1851,26 @@ class App:
 
     def start_level(self, index, diff=0):
         if index >= len(self.levels):
-            self.go_select()
+            self.go_theme()
             return
         self.timed_mode = None
         level = self._get_difficulty_level(index, diff)
         checkpoint = self.get_checkpoint(f"{index}:{diff}")
+        self.play = PlayState(self, level, level_index=index, diff=diff,
+                              checkpoint=checkpoint)
+        self.scene = "play"
+
+    def start_shape_level(self, theme, index, diff=0):
+        if index >= 6:
+            self.go_theme()
+            return
+        self.timed_mode = None
+        key = (theme, index, diff)
+        if key not in self._level_cache:
+            self._level_cache[key] = build_shape_level(theme, index, diff)
+        level = self._level_cache[key]
+        prefix = {"fruit": "f_", "animal": "a_"}[theme]
+        checkpoint = self.get_checkpoint(f"{prefix}{index}:{diff}")
         self.play = PlayState(self, level, level_index=index, diff=diff,
                               checkpoint=checkpoint)
         self.scene = "play"
@@ -1742,10 +1897,13 @@ class App:
         self.scene = "play"
 
     def restart_play(self, level, index, seq, diff=0, timed=None):
-        # 主动选择“重新开始”：旧进度立即作废，避免再次弹询问
-        self.clear_checkpoint(self.checkpoint_key(index, seq, diff))
+        # 主动选择"重新开始"：旧进度立即作废，避免再次弹询问
+        kind = level.get("shape_kind")
+        self.clear_checkpoint(self.checkpoint_key(index, seq, diff, theme=kind))
         if index < 0:
             self.start_random(seq, timed)
+        elif kind is not None:
+            self.start_shape_level(kind, index, diff)
         else:
             self.start_level(index, diff)
 
@@ -1753,8 +1911,18 @@ class App:
         self.scene = "menu"
         self.play = None
 
-    def go_select(self):
+    def go_theme(self):
+        """开始游戏 → 棋盘主题选择页。"""
+        self.pick_level = None
+        self.pick_timed = False
+        self.cur_theme = THEME_DEFAULT
+        self.scene = "theme"
+        self.play = None
+
+    def open_theme(self, theme):
+        """打开某主题下的 6 个关卡列表。"""
         self._build_select_ui()
+        self.cur_theme = theme
         self.pick_level = None
         self.pick_timed = False
         self.scene = "select"
@@ -1776,12 +1944,28 @@ class App:
                                     "gray", 24)
 
     def _build_select_ui(self):
-        self.cards = []
+        # 每个主题关卡列表页：返回主题页 + 随机 / 限时快捷入口
         self.btn_select_back = Button((36, 30, 110, 52), "返回", "gray", 22, "back")
-        self.btn_select_random = Button((WIDTH - 452, 30, 168, 52), "随机挑战",
+        self.btn_select_random = Button((WIDTH - 436, 30, 168, 52), "随机挑战",
                                         "orange", 22, "dice")
-        self.btn_select_timed = Button((WIDTH - 268, 30, 168, 52), "限时挑战",
+        self.btn_select_timed = Button((WIDTH - 252, 30, 168, 52), "限时挑战",
                                        "pink", 22)
+
+    def _build_theme_ui(self):
+        # 主题选择页：返回主菜单
+        self.btn_theme_back = Button((36, 30, 110, 52), "返回", "gray", 22, "back")
+        self.theme_rects = [
+            pygame.Rect(70, 300, 250, 320),
+            pygame.Rect(335, 300, 250, 320),
+            pygame.Rect(600, 300, 250, 320),
+        ]
+
+    def _build_boot_ui(self):
+        # 启动选择：继续进度 / 从头开始
+        self.btn_boot_continue = Button((WIDTH // 2 - 280, 560, 260, 68),
+                                        "继续游戏进度", "mint", 24)
+        self.btn_boot_reset = Button((WIDTH // 2 + 20, 560, 260, 68),
+                                     "从头开始", "pink", 24)
 
     def _build_pick_ui(self):
         # 难度选择弹窗（点击关卡卡片后弹出）
@@ -1986,9 +2170,16 @@ class App:
             self.draw(dt)
 
     def route_event(self, event):
-        if self.scene == "menu":
+        if self.scene == "boot":
+            if self.btn_boot_continue.handle_event(event, self.sounds):
+                self.scene = "menu"
+            elif self.btn_boot_reset.handle_event(event, self.sounds):
+                self.reset_progress()
+                self.sounds.set_master(float(self.save.get("volume", 1.0)))
+                self.scene = "menu"
+        elif self.scene == "menu":
             if self.btn_start.handle_event(event, self.sounds):
-                self.go_select()
+                self.go_theme()
             elif self.btn_help.handle_event(event, self.sounds):
                 self.scene = "help"
             elif self.btn_settings.handle_event(event, self.sounds):
@@ -1996,6 +2187,8 @@ class App:
             elif self.btn_quit.handle_event(event, self.sounds):
                 pygame.quit()
                 sys.exit(0)
+        elif self.scene == "theme":
+            self._theme_event(event)
         elif self.scene == "help":
             if self.btn_help_back.handle_event(event, self.sounds):
                 self.scene = "menu"
@@ -2010,13 +2203,100 @@ class App:
         if self.scene == "play" and self.play is not None:
             self.play.update(dt)
 
+    # ---------- 棋盘主题选择 ----------
+    def _theme_event(self, event):
+        s = self.sounds
+        if self.btn_theme_back.handle_event(event, s):
+            self.scene = "menu"
+            return
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if self.btn_theme_back.rect.collidepoint(event.pos):
+                self.scene = "menu"
+                return
+            for theme, rect in zip((THEME_DEFAULT, THEME_FRUIT, THEME_ANIMAL),
+                                   self.theme_rects):
+                if rect.collidepoint(event.pos):
+                    s.play("click")
+                    self.open_theme(theme)
+                    return
+
+    def _draw_theme(self, dt):
+        title = get_font(44).render("选择棋盘主题", True, WHITE)
+        ot = get_font(44).render("选择棋盘主题", True, (134, 92, 224))
+        x = WIDTH // 2 - title.get_width() // 2
+        self.screen.blit(ot, (x + 3, 103))
+        self.screen.blit(title, (x, 100))
+        sub = get_font(19).render("三种风格棋盘，每个主题 6 个关卡",
+                                  True, (24, 22, 34))
+        self.screen.blit(sub, sub.get_rect(center=(WIDTH // 2, 172)))
+        self.btn_theme_back.draw(self.screen, dt)
+
+        themes = (THEME_DEFAULT, THEME_FRUIT, THEME_ANIMAL)
+        for theme, rect in zip(themes, self.theme_rects):
+            hover = rect.collidepoint(self.mouse)
+            card = jelly_surface(rect.w, rect.h, (255, 255, 255),
+                                 (228, 236, 250), radius=30,
+                                 shadow=10 if not hover else 14, gloss=True,
+                                 outline=(210, 224, 246))
+            self.screen.blit(card, (rect.x, rect.y - (4 if hover else 0)))
+            self._draw_theme_preview(theme, rect)
+            name = get_font(28).render(THEME_LABELS[theme], True, INK)
+            self.screen.blit(name, name.get_rect(center=(rect.centerx, rect.bottom - 66)))
+            desc_text = {THEME_DEFAULT: "经典矩形棋盘",
+                         THEME_FRUIT: "水果形状异形棋盘",
+                         THEME_ANIMAL: "动物形状异形棋盘"}[theme]
+            desc = get_font(17).render(desc_text, True, (88, 80, 112))
+            self.screen.blit(desc, desc.get_rect(center=(rect.centerx, rect.bottom - 34)))
+
+    def _draw_theme_preview(self, theme, rect):
+        """主题卡片上半部的形状缩略预览。"""
+        if theme == THEME_DEFAULT:
+            # 4×4 小网格
+            n = 4
+            cell = 22
+            pw = cell * n
+            px = rect.centerx - pw // 2
+            py = rect.y + 44
+            for r in range(n):
+                for c in range(n):
+                    rct = pygame.Rect(px + c * cell, py + r * cell, cell - 3, cell - 3)
+                    mini = jelly_surface(rct.w, rct.h, (236, 244, 255),
+                                         (200, 222, 252), radius=6, shadow=0)
+                    self.screen.blit(mini, rct)
+            return
+        metas = self.theme_meta(theme)
+        meta = metas[0]  # 水果取苹果、动物取小猫作为代表
+        blit_pixel_preview(self.screen, meta["cells"], rect.centerx,
+                           rect.y + 30, 190, 190)
+
+    # ---------- 启动选择 ----------
+    def _draw_boot(self, dt):
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill((52, 38, 92, 140))
+        self.screen.blit(overlay, (0, 0))
+        panel = jelly_surface(700, 400, (255, 255, 255), (235, 241, 255),
+                              radius=34, shadow=14)
+        pr = panel.get_rect(center=(WIDTH // 2, HEIGHT // 2 - 40))
+        self.screen.blit(panel, pr)
+        title = get_font(34).render("欢迎回来，小箭神！", True, INK)
+        self.screen.blit(title, title.get_rect(center=(WIDTH // 2, pr.top + 72)))
+        tip = get_font(21).render("检测到上次的游戏进度，要继续吗？", True, (126, 112, 164))
+        self.screen.blit(tip, tip.get_rect(center=(WIDTH // 2, pr.top + 128)))
+        note = get_font(17).render("选择「从头开始」将清空全部星级与解锁记录（音量等设置保留）",
+                                   True, (160, 148, 188))
+        self.screen.blit(note, note.get_rect(center=(WIDTH // 2, pr.top + 200)))
+        self.btn_boot_continue.rect.center = (WIDTH // 2 - 150, pr.top + 290)
+        self.btn_boot_reset.rect.center = (WIDTH // 2 + 150, pr.top + 290)
+        self.btn_boot_continue.draw(self.screen, dt)
+        self.btn_boot_reset.draw(self.screen, dt)
+
     # ---------- 选关 ----------
     def _card_rect(self, i):
         cols = 3
         cw, ch = 252, 178
         gap_x, gap_y = 28, 26
         x0 = (WIDTH - (cw * cols + gap_x * (cols - 1))) // 2
-        y0 = 180
+        y0 = 194
         r, c = divmod(i, cols)
         return pygame.Rect(x0 + c * (cw + gap_x), y0 + r * (ch + gap_y), cw, ch)
 
@@ -2028,8 +2308,12 @@ class App:
                 for i, b in enumerate(self.diff_btns):
                     if b.rect.collidepoint(event.pos):
                         idx = self.pick_level
+                        theme = self.cur_theme
                         self.pick_level = None
-                        self.start_level(idx, i)
+                        if theme == THEME_DEFAULT:
+                            self.start_level(idx, i)
+                        else:
+                            self.start_shape_level(theme, idx, i)
                         return
                 if self.btn_pick_cancel.rect.collidepoint(event.pos):
                     s.play("click")
@@ -2052,7 +2336,7 @@ class App:
         self.btn_select_timed.handle_event(event, s)
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             if self.btn_select_back.rect.collidepoint(event.pos):
-                self.scene = "menu"
+                self.scene = "theme"
                 return
             if self.btn_select_random.rect.collidepoint(event.pos):
                 self.start_random(0)
@@ -2060,15 +2344,22 @@ class App:
             if self.btn_select_timed.rect.collidepoint(event.pos):
                 self.pick_timed = True
                 return
-            for i, level in enumerate(self.levels):
+            total = 6
+            for i in range(total):
                 rect = self._card_rect(i)
                 if rect.collidepoint(event.pos):
-                    unlocked = i + 1 <= self.save.get("unlocked", 1)
+                    unlocked = self._is_unlocked(self.cur_theme, i)
                     if unlocked:
                         s.play("click")
                         self.pick_level = i
                     else:
                         s.play("collide")
+
+    def _is_unlocked(self, theme, i):
+        if theme == THEME_DEFAULT:
+            return i + 1 <= self.save.get("unlocked", 1)
+        key = "fruit_unlocked" if theme == THEME_FRUIT else "animal_unlocked"
+        return i + 1 <= self.save.get(key, 1)
 
     # ---------- 绘制分发 ----------
     def _day_progress(self):
@@ -2079,6 +2370,10 @@ class App:
         self.bg.draw(self.screen, self.t, self._day_progress())
         if self.scene == "menu":
             self._draw_menu(dt)
+        elif self.scene == "boot":
+            self._draw_boot(dt)
+        elif self.scene == "theme":
+            self._draw_theme(dt)
         elif self.scene == "help":
             self._draw_help(dt)
         elif self.scene == "settings":
@@ -2176,59 +2471,94 @@ class App:
 
     # ---------- 选关界面 ----------
     def _draw_select(self, dt):
-        title = get_font(46).render("选择关卡", True, WHITE)
-        ot = get_font(46).render("选择关卡", True, (134, 92, 224))
+        theme = self.cur_theme
+        is_shape = theme != THEME_DEFAULT
+        title_text = THEME_LABELS[theme]
+        title = get_font(46).render(title_text, True, WHITE)
+        ot = get_font(46).render(title_text, True, (134, 92, 224))
         x = WIDTH // 2 - title.get_width() // 2
         self.screen.blit(ot, (x + 3, 103))
         self.screen.blit(title, (x, 100))
         sub = get_font(19).render("点击关卡卡片，选择 简单 / 中等 / 困难 难度开始",
-                                  True, INK)
-        self.screen.blit(sub, sub.get_rect(center=(WIDTH // 2, 158)))
+                                  True, (24, 22, 34))
+        self.screen.blit(sub, sub.get_rect(center=(WIDTH // 2, 172)))
         self.btn_select_back.draw(self.screen, dt)
         self.btn_select_random.draw(self.screen, dt)
         self.btn_select_timed.draw(self.screen, dt)
 
-        for i, level in enumerate(self.levels):
+        metas = self.theme_meta(theme) if is_shape else None
+        card_styles = (["blue", "pink", "mint", "orange", "purple", "blue"]
+                       if not is_shape else
+                       ["pink", "mint", "orange", "grape", "red", "yellow"])
+        # 回退到已注册的按钮配色，避免 KeyError
+        for i_s, st in enumerate(card_styles):
+            if st not in BUTTON_STYLE:
+                card_styles[i_s] = ["pink", "mint", "blue", "orange", "purple"][i_s % 5]
+
+        for i in range(6):
             rect = self._card_rect(i)
-            unlocked = i + 1 <= self.save.get("unlocked", 1)
+            unlocked = self._is_unlocked(theme, i)
             hover = unlocked and self.pick_level is None and not self.pick_timed \
                 and rect.collidepoint(self.mouse)
             offset = 6 if hover else 0
-            style = ["pink", "mint", "blue", "orange", "purple", "pink"][i]
-            top, bottom = BUTTON_STYLE[style]
+            top, bottom = BUTTON_STYLE[card_styles[i]]
             if not unlocked:
                 top, bottom = (214, 216, 226), (184, 188, 204)
             card = jelly_surface(rect.w, rect.h, top, bottom, radius=26, shadow=8,
                                  gloss=True)
             self.screen.blit(card, (rect.x, rect.y + 4 + offset))
-            num = get_font(40).render(f"第 {i + 1} 关", True, WHITE)
-            self.screen.blit(num, num.get_rect(center=(rect.centerx, rect.y + 44 + offset)))
-            name = get_font(22).render(level["name"], True, WHITE)
-            self.screen.blit(name, name.get_rect(center=(rect.centerx, rect.y + 90 + offset)))
-            if unlocked:
-                # 星级/最佳取三种难度的最好成绩
-                stars = max(self.save["stars"].get(f"{i}:{d}", 0) for d in range(3))
-                for k in range(3):
-                    s = star_surface(30, gray=k >= stars)
-                    self.screen.blit(s, s.get_rect(
-                        center=(rect.centerx + (k - 1) * 38, rect.y + 138 + offset)))
-                best = max((self.save["best"].get(f"{i}:{d}", 0) for d in range(3)),
-                           default=0)
-                if best:
-                    bt = get_font(15).render(f"最佳 {best}", True, WHITE)
-                    self.screen.blit(bt, bt.get_rect(center=(rect.centerx,
-                                                             rect.bottom - 12 + offset)))
+
+            if is_shape:
+                meta = metas[i]
+                self._draw_card_shape(meta, rect, offset)
+                level_name = meta["name"]
+                name = get_font(22).render(level_name, True, WHITE)
+                self.screen.blit(name, name.get_rect(
+                    center=(rect.centerx, rect.y + 130 + offset)))
+                star_key_prefix = "f_" if theme == THEME_FRUIT else "a_"
             else:
-                lock = pygame.Surface((44, 44), pygame.SRCALPHA)
-                pygame.draw.arc(lock, WHITE, (9, 0, 26, 22), math.pi, 3 * math.pi, 6)
-                pygame.draw.rect(lock, WHITE, (4, 19, 36, 22), border_radius=7)
-                pygame.draw.circle(lock, (150, 155, 178), (22, 28), 3.5)
-                self.screen.blit(lock, lock.get_rect(center=(rect.centerx, rect.y + 142 + offset)))
+                num = get_font(40).render(f"第 {i + 1} 关", True, WHITE)
+                self.screen.blit(num, num.get_rect(
+                    center=(rect.centerx, rect.y + 44 + offset)))
+                name = get_font(22).render(self.levels[i]["name"], True, WHITE)
+                self.screen.blit(name, name.get_rect(
+                    center=(rect.centerx, rect.y + 90 + offset)))
+                star_key_prefix = ""
+
+            if unlocked:
+                sk = f"{star_key_prefix}{i}"
+                stars = max(self.save["stars"].get(f"{sk}:{d}", 0) for d in range(3))
+                star_y = rect.bottom - 30 if is_shape else rect.y + 140
+                for k in range(3):
+                    s = star_surface(28 if is_shape else 30, gray=k >= stars)
+                    self.screen.blit(s, s.get_rect(
+                        center=(rect.centerx + (k - 1) * (34 if is_shape else 38),
+                                star_y + offset)))
+                if not is_shape:
+                    best = max((self.save["best"].get(f"{i}:{d}", 0) for d in range(3)),
+                               default=0)
+                    if best:
+                        bt = get_font(15).render(f"最佳 {best}", True, WHITE)
+                        self.screen.blit(bt, bt.get_rect(
+                            center=(rect.centerx, rect.bottom - 12 + offset)))
+            else:
+                lock = pygame.Surface((40, 40), pygame.SRCALPHA)
+                pygame.draw.arc(lock, WHITE, (8, 0, 24, 20), math.pi, 3 * math.pi, 5)
+                pygame.draw.rect(lock, WHITE, (4, 18, 32, 20), border_radius=6)
+                pygame.draw.circle(lock, (150, 155, 178), (20, 26), 3)
+                lock_y = rect.bottom - 28 if is_shape else rect.y + 142
+                self.screen.blit(lock, lock.get_rect(
+                    center=(rect.centerx, lock_y + offset)))
 
         if self.pick_level is not None:
             self._draw_diff_pick(dt)
         elif self.pick_timed:
             self._draw_timed_pick(dt)
+
+    def _draw_card_shape(self, meta, rect, offset):
+        """关卡卡片上的像素画缩略预览。"""
+        blit_pixel_preview(self.screen, meta["cells"], rect.centerx,
+                           rect.y + 14 + offset, 150, 110)
 
     def _draw_diff_pick(self, dt):
         d = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
@@ -2238,11 +2568,35 @@ class App:
                               radius=32, shadow=12)
         pr = panel.get_rect(center=(WIDTH // 2, HEIGHT // 2))
         self.screen.blit(panel, pr)
-        name = self.levels[self.pick_level]["name"]
-        title = get_font(32).render(f"第 {self.pick_level + 1} 关 · 选择难度", True, INK)
+        is_shape = self.cur_theme != THEME_DEFAULT
+        if is_shape:
+            metas = self.theme_meta(self.cur_theme)
+            name = metas[self.pick_level]["name"]
+            title = get_font(32).render(f"{name} · 选择难度", True, INK)
+            tip = get_font(19).render("同一种形状，箭头越多越烧脑", True, (130, 120, 160))
+        else:
+            name = self.levels[self.pick_level]["name"]
+            title = get_font(32).render(f"第 {self.pick_level + 1} 关 · 选择难度", True, INK)
+            tip = get_font(19).render(f"「{name}」三种棋盘规格，箭头越多越烧脑", True, (130, 120, 160))
         self.screen.blit(title, title.get_rect(center=(WIDTH // 2, pr.top + 62)))
-        tip = get_font(19).render(f"「{name}」三种棋盘规格，箭头越多越烧脑", True, (130, 120, 160))
-        self.screen.blit(tip, tip.get_rect(center=(WIDTH // 2, pr.top + 104)))
+        self.screen.blit(tip, tip.get_rect(center=(WIDTH // 2, pr.top + 112)))
+        # 形状关卡难度按钮文案：同形状，箭头数随难度递增
+        if is_shape:
+            metas = self.theme_meta(self.cur_theme)
+            n_active = metas[self.pick_level]["playable"]
+            for i, (label, ratio, _tl) in enumerate(
+                    [("简单", 0.50, 75), ("中等", 0.70, 105), ("困难", 0.88, 140)]):
+                self.diff_btns[i].text = f"{label}  · {round(n_active * ratio)} 支箭头"
+        else:
+            # 默认主题按钮文案恢复为棋盘规格文案
+            n_easy = round(25 * 0.55)
+            n_mid = round(36 * 0.70)
+            n_hard = round(49 * 0.88)
+            texts = [f"简单  5×5 · {n_easy} 支箭头",
+                     f"中等  6×6 · {n_mid} 支箭头",
+                     f"困难  7×7 · {n_hard} 支箭头"]
+            for i, t in enumerate(texts):
+                self.diff_btns[i].text = t
         for i, b in enumerate(self.diff_btns):
             b.rect.center = (WIDTH // 2, pr.top + 170 + i * 76)
             b.draw(self.screen, dt)
@@ -2260,7 +2614,7 @@ class App:
         title = get_font(32).render("限时挑战", True, (232, 62, 130))
         self.screen.blit(title, title.get_rect(center=(WIDTH // 2, pr.top + 60)))
         tip = get_font(19).render("在倒计时归零前清空全部箭头！", True, (130, 120, 160))
-        self.screen.blit(tip, tip.get_rect(center=(WIDTH // 2, pr.top + 102)))
+        self.screen.blit(tip, tip.get_rect(center=(WIDTH // 2, pr.top + 110)))
         for i, b in enumerate(self.timed_btns):
             b.rect.center = (WIDTH // 2, pr.top + 158 + i * 72)
             b.draw(self.screen, dt)
