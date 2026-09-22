@@ -239,6 +239,48 @@ def all_levels() -> list[dict]:
     return [build_level(spec) for spec in HAND_LEVELS + GENERATED_LEVELS]
 
 
+# ---------------- 难度分级 ----------------
+# 每关均可选 简单/中等/困难：(名称, 棋盘边长, 填充率, 限时秒, 按钮配色)
+DIFFICULTIES = [
+    ("简单", 5, 0.55, 75, "mint"),
+    ("中等", 6, 0.70, 105, "orange"),
+    ("困难", 7, 0.88, 140, "pink"),
+]
+
+
+def build_difficulty_level(index: int, diff: int) -> dict:
+    """
+    按关卡序号 + 难度（0=简单 / 1=中等 / 2=困难）构造关卡。
+    固定种子保证同一 (关卡, 难度) 布局一致、存档可复现；
+    填充率最高 88%，尽量把棋盘填满提高可玩性。
+    """
+    label, size, ratio, time_limit, _style = DIFFICULTIES[diff]
+    target = round(size * size * ratio)
+    arrows = None
+    # 个别种子在高密度下可能摆不下，逐级降低数量重试
+    for count in (target, target - 2, target - 4, target - 6):
+        if count < 6:
+            break
+        try:
+            arrows = reverse_generate(size, size, count,
+                                      seed=1009 * (index + 1) + 373 * (diff + 1))
+            break
+        except RuntimeError:
+            continue
+    if arrows is None:
+        arrows = reverse_generate(size, size, max(6, target // 2), seed=7)
+    bases = HAND_LEVELS + GENERATED_LEVELS
+    base_name = bases[index]["name"] if index < len(bases) else f"第{index + 1}关"
+    return {
+        "name": f"{base_name}·{label}",
+        "rows": size,
+        "cols": size,
+        "time_limit": float(time_limit),
+        "mistakes": 3,
+        "arrows": arrows,
+    }
+
+
 def make_random_level(index: int) -> dict:
     """随机挑战模式：难度随关卡序号递增，规模 5x5 → 8x8。"""
     rng = random.Random()

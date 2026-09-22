@@ -19,14 +19,14 @@ from datetime import datetime
 
 import pygame
 
-from levels import all_levels, make_random_level
+from levels import all_levels, build_difficulty_level, make_random_level
 from model import CLICK_BLOCKED, CLICK_FLY, Direction, GameSession
 from scenery import DreamScene
 from sounds import SoundManager
 
 # ============================== 基础配置 ==============================
 WIDTH, HEIGHT = 920, 920
-FPS = 60
+FPS = 120
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SAVE_PATH = os.path.join(BASE_DIR, "save.json")
 
@@ -58,6 +58,29 @@ BUTTON_STYLE = {
     "orange": ((255, 190, 92), (242, 146, 20)),
     "gray": ((226, 228, 242), (184, 188, 210)),
 }
+
+# 设置页可选箭头配色：index 0 = 经典四色（随方向变色），其余为统一纯色渐变主题
+ARROW_COLORS = [
+    ("经典四色", None),
+    ("草莓粉", ((255, 138, 177), (224, 49, 117))),
+    ("苏打蓝", ((96, 190, 255), (35, 132, 224))),
+    ("薄荷绿", ((93, 226, 170), (24, 176, 125))),
+    ("芒果黄", ((255, 206, 84), (245, 158, 11))),
+    ("葡萄紫", ((190, 159, 255), (134, 92, 224))),
+    ("蜜桃橙", ((255, 176, 124), (240, 122, 66))),
+    ("樱桃红", ((255, 116, 134), (216, 44, 84))),
+    ("青柠绿", ((196, 240, 108), (116, 192, 44))),
+    ("天空青", ((124, 228, 230), (44, 178, 198))),
+    ("薰衣草", ((216, 182, 255), (152, 112, 232))),
+]
+
+# 设置页可选箭头表情：classic = 按方向自动搭配；其余为全局统一表情
+FACE_OPTIONS = [
+    ("classic", "经典"), ("happy", "微笑"), ("joy", "大笑"), ("angry", "生气"),
+    ("sad", "委屈"), ("sleepy", "困困"), ("cool", "酷盖"), ("love", "花痴"),
+    ("star", "星星眼"), ("dizzy", "晕晕"), ("surprised", "惊讶"),
+    ("cheeky", "调皮"), ("shy", "害羞"),
+]
 
 
 # ============================== 工具函数 ==============================
@@ -164,12 +187,35 @@ def jelly_surface(w, h, top, bottom, radius=24, shadow=6, gloss=True, outline=No
 _arrow_cache: dict = {}
 
 
+def star_points(cx, cy, r):
+    """五角星顶点（尖朝上）。"""
+    pts = []
+    for i in range(10):
+        ang = -math.pi / 2 + i * math.pi / 5
+        rr = r if i % 2 == 0 else r * 0.45
+        pts.append((cx + rr * math.cos(ang), cy + rr * math.sin(ang)))
+    return pts
+
+
+def draw_star(surf, cx, cy, r, top=(255, 214, 84), bottom=(245, 158, 11)):
+    """立体小星星：暗色描边 + 亮色主体 + 白色高光。"""
+    pts = star_points(cx, cy, r)
+    pts_out = [(cx + (px - cx) * 1.18, cy + (py - cy) * 1.18) for px, py in pts]
+    pygame.draw.polygon(surf, lerp(bottom, (0, 0, 0), 0.3), pts_out)
+    pygame.draw.polygon(surf, top, pts)
+    pygame.draw.circle(surf, (255, 255, 255),
+                       (int(cx - r * 0.28), int(cy - r * 0.3)),
+                       max(1, int(r * 0.18)))
+
+
 def arrow_surface(size, top, bottom, face="happy", blink=0, mood="normal"):
     """画一支朝右的胖嘟嘟立体箭头，旋转即可表示其它方向。
 
-    face: happy=喜(微笑) / joy=乐(大笑) / angry=怒 / sad=哀
+    face: happy=微笑 / joy=大笑 / angry=生气 / sad=委屈 / sleepy=困困 /
+          cool=酷盖(墨镜) / love=花痴(爱心眼) / star=星星眼 / dizzy=晕晕 /
+          surprised=惊讶 / cheeky=调皮(吐舌眨眼) / shy=害羞
     blink: 0~1，眼睛闭合程度（用于眨眼动画，内部量化为 5 档缓存）
-    mood: normal=平常 / cry=哭泣（走错时使用，挤眼、撇嘴、掉眼泪）
+    mood: normal=平常 / cry=哭泣（走错时使用，挤眼、大哭、掉眼泪）
     """
     blink_step = int(round(min(1, max(0, blink)) * 4))
     key = ("arrow", int(size), top, bottom, face, blink_step, mood)
@@ -222,18 +268,80 @@ def arrow_surface(size, top, bottom, face="happy", blink=0, mood="normal"):
     for ex in (0.195, 0.365):
         ex_px = 5 + int(ex * s)
         if mood == "cry":
-            # 哭泣时挤成上拱的弧线（∧）
-            rr = int(eye_r * 1.35)
-            pygame.draw.arc(surf, ink,
-                            pygame.Rect(ex_px - rr, ey - rr, 2 * rr, 2 * rr),
-                            math.radians(30), math.radians(150),
-                            max(2, s // 20))
+            # 哭泣挤眼："><" 形尖角相对，委屈又生动
+            rr = max(3, int(eye_r * 1.2))
+            lw = max(2, s // 18)
+            tip = rr // 2
+            if ex < 0.28:   # 左眼 ">"：尖角朝内
+                pygame.draw.line(surf, ink, (ex_px - rr, ey - rr), (ex_px + tip, ey), lw)
+                pygame.draw.line(surf, ink, (ex_px - rr, ey + rr), (ex_px + tip, ey), lw)
+            else:           # 右眼 "<"：尖角朝内
+                pygame.draw.line(surf, ink, (ex_px + rr, ey - rr), (ex_px - tip, ey), lw)
+                pygame.draw.line(surf, ink, (ex_px + rr, ey + rr), (ex_px - tip, ey), lw)
         elif face == "joy":
             # 眯眯笑眼 ^ ^
             r = pygame.Rect(int(ex_px - eye_r * 1.2), int(ey - eye_r),
                             int(eye_r * 2.4), int(eye_r * 2.1))
             pygame.draw.arc(surf, ink, r, math.radians(200), math.radians(340),
                             max(2, s // 22))
+        elif face == "sleepy":
+            # 困困：闭成下弯的弧（呼呼大睡）
+            rr = int(eye_r * 1.25)
+            pygame.draw.arc(surf, ink,
+                            pygame.Rect(ex_px - rr, ey - rr // 2, 2 * rr, rr + rr // 2),
+                            math.radians(205), math.radians(335), max(2, s // 20))
+        elif face == "love":
+            # 花痴：立体爱心眼 + 高光
+            hr = int(eye_r * 1.2)
+            hc = (250, 90, 130)
+            ytop = ey - hr // 3
+            pygame.draw.circle(surf, hc, (ex_px - hr // 2, ytop), hr // 2 + 1)
+            pygame.draw.circle(surf, hc, (ex_px + hr // 2, ytop), hr // 2 + 1)
+            pygame.draw.polygon(surf, hc, [(ex_px - hr, ytop - hr // 4),
+                                           (ex_px + hr, ytop - hr // 4),
+                                           (ex_px, ey + hr)])
+            pygame.draw.circle(surf, (255, 255, 255),
+                               (ex_px - hr // 2 + max(1, hr // 6), ytop - max(1, hr // 6)),
+                               max(1, hr // 5))
+        elif face == "star":
+            # 星星眼
+            draw_star(surf, ex_px, ey, int(eye_r * 1.55))
+        elif face == "dizzy":
+            # 晕晕：X 形眼
+            rr = int(eye_r * 0.95)
+            lw = max(2, s // 20)
+            pygame.draw.line(surf, ink, (ex_px - rr, ey - rr), (ex_px + rr, ey + rr), lw)
+            pygame.draw.line(surf, ink, (ex_px - rr, ey + rr), (ex_px + rr, ey - rr), lw)
+        elif face == "surprised":
+            # 惊讶：圆睁大眼 + 大高光
+            eh = int(eye_r * 1.25)
+            pygame.draw.ellipse(surf, ink, (ex_px - eye_r, ey - eh, 2 * eye_r, 2 * eh))
+            pygame.draw.circle(surf, WHITE,
+                               (ex_px - eye_r // 3, ey - eh // 2),
+                               max(1, int(eye_r * 0.45)))
+        elif face == "cheeky":
+            # 调皮：左眼正常、右眼眨眼
+            if ex < 0.28:
+                eh = max(1, int(eye_r * (0.16 + 0.84 * open_k)))
+                pygame.draw.ellipse(surf, ink,
+                                    (ex_px - eye_r, ey - eh, 2 * eye_r, 2 * eh))
+                pygame.draw.circle(surf, WHITE,
+                                   (int(ex_px - eye_r * 0.3), int(ey - eye_r * 0.3)),
+                                   max(1, int(eye_r * 0.4)))
+            else:
+                rr = int(eye_r * 1.2)
+                pygame.draw.arc(surf, ink,
+                                pygame.Rect(ex_px - rr, ey - rr, 2 * rr, 2 * rr),
+                                math.radians(200), math.radians(340),
+                                max(2, s // 20))
+        elif face == "shy":
+            # 害羞：弯弯的笑眼（配合大腮红）
+            rr = int(eye_r * 1.15)
+            pygame.draw.arc(surf, ink,
+                            pygame.Rect(ex_px - rr, ey - rr, 2 * rr, 2 * rr),
+                            math.radians(200), math.radians(340), max(2, s // 20))
+        elif face == "cool":
+            pass  # 墨镜在眼睛循环之后整体绘制
         else:
             # 普通眼睛随眨眼压扁
             eh = max(1, int(eye_r * (0.16 + 0.84 * open_k)))
@@ -248,21 +356,47 @@ def arrow_surface(size, top, bottom, face="happy", blink=0, mood="normal"):
     my = 5 + int(0.57 * s)
     R = max(3, int(0.085 * s))
     mw = max(2, s // 20)
+    if face == "cool" and mood == "normal":
+        # 酷盖墨镜：两片深色镜面 + 镜桥镜腿 + 高光斜杠
+        gy = ey - int(eye_r * 1.05)
+        gh = int(eye_r * 2.2)
+        gw = int(eye_r * 2.6)
+        lx, rx2 = 5 + int(0.195 * s), 5 + int(0.365 * s)
+        pygame.draw.rect(surf, (40, 36, 60), (lx - gw // 2, gy, gw, gh),
+                         border_radius=max(4, s // 14))
+        pygame.draw.rect(surf, (40, 36, 60), (rx2 - gw // 2, gy, gw, gh),
+                         border_radius=max(4, s // 14))
+        pygame.draw.line(surf, (40, 36, 60), (lx + gw // 2 - 2, gy + gh // 3),
+                         (rx2 - gw // 2 + 2, gy + gh // 3), max(2, s // 22))
+        pygame.draw.line(surf, (40, 36, 60), (lx - gw // 2, gy + gh // 3),
+                         (lx - gw // 2 - int(eye_r * 0.7), gy + gh // 4), max(2, s // 22))
+        pygame.draw.line(surf, (40, 36, 60), (rx2 + gw // 2, gy + gh // 3),
+                         (rx2 + gw // 2 + int(eye_r * 0.7), gy + gh // 4), max(2, s // 22))
+        pygame.draw.line(surf, (235, 240, 255), (lx - gw // 3, gy + gh - 5),
+                         (lx - gw // 6, gy + 5), max(2, s // 26))
+        pygame.draw.line(surf, (235, 240, 255), (rx2 - gw // 3, gy + gh - 5),
+                         (rx2 - gw // 6, gy + 5), max(2, s // 26))
     if mood == "cry":
-        # 哭泣：向下撇的嘴（上拱弧）+ 两边泪珠
-        pygame.draw.arc(surf, ink,
-                        pygame.Rect(mx - R, my - int(R * 0.7), 2 * R, int(R * 1.5)),
-                        math.radians(200), math.radians(340), mw)
-        for ex in (0.195, 0.365):
+        # 哭泣：张嘴哇哇大哭（深色小椭圆 + 粉舌头）+ 带高光的大泪珠
+        mw2 = max(3, int(R * 1.05))
+        pygame.draw.ellipse(surf, ink,
+                            (mx - mw2, my - int(R * 0.5), mw2 * 2, int(R * 1.15)))
+        pygame.draw.ellipse(surf, (238, 110, 130),
+                            (mx - int(mw2 * 0.5), my + int(R * 0.15),
+                             mw2, int(R * 0.5)))
+        for i, ex in enumerate((0.155, 0.405)):
             tx = 5 + int(ex * s)
-            ty = ey + eye_r + max(2, int(0.03 * s))
-            tr = max(2, int(eye_r * 0.62))
-            # 泪珠：上尖下圆
-            pygame.draw.polygon(surf, (130, 190, 255),
+            ty = 5 + int(0.585 * s) + i * max(1, s // 70)
+            tr = max(2, int(eye_r * 0.55))
+            drop = (135, 200, 255)
+            # 泪珠：上尖下圆 + 白色高光，两滴高低错开像正在流
+            pygame.draw.polygon(surf, drop,
                                 [(tx - tr, ty), (tx + tr, ty),
-                                 (tx, ty - int(tr * 1.25))])
-            pygame.draw.circle(surf, (130, 190, 255),
-                               (tx, ty + int(tr * 0.35)), tr)
+                                 (tx, ty - int(tr * 1.3))])
+            pygame.draw.circle(surf, drop, (tx, ty + int(tr * 0.35)), tr)
+            pygame.draw.circle(surf, (255, 255, 255),
+                               (tx - int(tr * 0.3), ty + int(tr * 0.3)),
+                               max(1, int(tr * 0.3)))
     elif face == "happy":
         pygame.draw.arc(surf, ink,
                         pygame.Rect(mx - R, my - int(R * 0.85), 2 * R, int(R * 1.7)),
@@ -291,20 +425,58 @@ def arrow_surface(size, top, bottom, face="happy", blink=0, mood="normal"):
         pygame.draw.circle(surf, (130, 190, 255),
                            (5 + int(0.42 * s), 5 + int(0.545 * s)),
                            max(2, int(0.035 * s)))
-    # 腮红（哭泣时不画，留给泪珠）
-    if mood != "cry" and face in ("happy", "joy", "angry"):
+    elif face == "sleepy":
+        # 睡着的小圆嘴 + 鼻尖小泡泡
+        pygame.draw.ellipse(surf, ink, (mx - R // 2, my - 2, R, R))
+        pygame.draw.circle(surf, (205, 228, 255), (mx + R, my - int(R * 0.9)),
+                           max(2, R // 2))
+    elif face == "cool":
+        # 得意斜嘴
+        pygame.draw.line(surf, ink, (mx - R, my + R // 3), (mx + R, my - R // 4), mw)
+    elif face == "love":
+        # 小开心嘴
+        pygame.draw.arc(surf, ink,
+                        pygame.Rect(mx - R, my - int(R * 0.8), 2 * R, int(R * 1.5)),
+                        math.radians(25), math.radians(155), mw)
+    elif face == "star":
+        # 张嘴欢呼（小下半圆）
+        pts = [(mx + int(R * 0.8 * math.cos(math.radians(a))),
+                my + int(R * 0.75 * math.sin(math.radians(a))))
+               for a in range(0, 181, 12)]
+        pygame.draw.polygon(surf, ink, pts)
+    elif face == "dizzy":
+        # 波浪嘴（晕乎乎）
+        pts = [(mx - int(R * 1.3), my), (mx - int(R * 0.65), my - R // 2),
+               (mx, my), (mx + int(R * 0.65), my + R // 2), (mx + int(R * 1.3), my)]
+        pygame.draw.lines(surf, ink, False, pts, mw)
+    elif face == "surprised":
+        # O 形嘴 + 小舌头
+        pygame.draw.ellipse(surf, ink, (mx - R, my - int(R * 0.7), 2 * R, int(R * 1.5)))
+        pygame.draw.ellipse(surf, (255, 170, 180), (mx - R // 2, my, R, int(R * 0.7)))
+    elif face == "cheeky":
+        # 吐舌头
+        pygame.draw.line(surf, ink, (mx - R, my), (mx + R, my - 2), mw)
+        pygame.draw.ellipse(surf, (240, 110, 130),
+                            (mx - int(R * 0.6), my + 1, int(R * 1.2), int(R * 1.1)))
+    elif face == "shy":
+        # w 形猫嘴
+        pygame.draw.arc(surf, ink, (mx - R, my - int(R * 0.4), R, R), 0, math.pi, mw)
+        pygame.draw.arc(surf, ink, (mx, my - int(R * 0.4), R, R), 0, math.pi, mw)
+    # 腮红（哭泣时不画留给泪珠；墨镜脸不画；害羞腮红加大且下移避 开眼睛）
+    if mood != "cry" and face != "cool":
         cheek = (255, 150, 165, 130) if face != "angry" else (255, 120, 110, 145)
+        is_shy = face == "shy"
+        cr = max(2, int(0.072 * s) if is_shy else int(0.055 * s))
+        cy = 5 + int((0.605 if is_shy else 0.555) * s)
         for cx in (0.165, 0.40):
-            pygame.draw.circle(surf, cheek,
-                               (5 + int(cx * s), 5 + int(0.555 * s)),
-                               max(2, int(0.055 * s)))
+            pygame.draw.circle(surf, cheek, (5 + int(cx * s), cy), cr)
     _arrow_cache[key] = surf
     return surf
 
 
 def rotated_arrow(size, direction, red=False, face="happy",
-                  blink=0, mood="normal"):
-    top, bottom = DIR_RED if red else DIR_STYLE[direction]
+                  blink=0, mood="normal", colors=None):
+    top, bottom = DIR_RED if red else (colors if colors else DIR_STYLE[direction])
     surf = arrow_surface(size, top, bottom, face, blink=blink, mood=mood)
     if direction.angle:
         surf = pygame.transform.rotate(surf, -direction.angle)
@@ -435,17 +607,15 @@ def bunny_praise_surface():
 
 
 def thumbs_cat_surface(size=200):
-    """失败页用：大头大眼、爪子举起竖起大拇指点赞的超精细小猫咪贴纸。"""
-    key = ("thumbs_cat2", size)
+    """失败页用：大脸大眼的高清立体猫咪头贴纸。"""
+    key = ("cat_head_v3", size)
     if key in _surf_cache:
         return _surf_cache[key]
     B = 220
     surf = pygame.Surface((B, B), pygame.SRCALPHA)
     ink = (56, 50, 72)
-    soft_ink = (96, 88, 112)
     fur_shade = (232, 216, 226)
     pink = (255, 172, 198)
-    pink_soft = (255, 222, 232)
     gold = (255, 222, 102)
 
     def mini_heart(cx, cy, r, color):
@@ -463,52 +633,23 @@ def thumbs_cat_surface(size=200):
             pts.append((cx + rad * math.cos(ang), cy + rad * math.sin(ang)))
         pygame.draw.polygon(surf, color, pts)
 
-    def capsule(p1, p2, width, color):
-        """圆角长条（两端为半圆），用来画手臂和大拇指。"""
-        pygame.draw.line(surf, color, p1, p2, width)
-        r = width // 2
-        pygame.draw.circle(surf, color, p1, r)
-        pygame.draw.circle(surf, color, p2, r)
-
-    def arc_about(cx, cy, r, a0, a1, color, width=3):
-        box = pygame.Rect(cx - r, cy - r, 2 * r, 2 * r)
-        pygame.draw.arc(surf, color, box, math.radians(a0),
-                        math.radians(a1), width)
-
     # ---- 贴纸底 ----
     pygame.draw.rect(surf, WHITE, (0, 0, B, B), border_radius=40)
     pygame.draw.rect(surf, (250, 237, 247), (10, 10, B - 20, B - 20),
                      border_radius=32)
-    # 地面柔和投影
-    sh = pygame.Surface((130, 22), pygame.SRCALPHA)
-    pygame.draw.ellipse(sh, (90, 70, 110, 46), sh.get_rect())
-    surf.blit(sh, (44, 192))
 
-    # 背景小点缀
-    mini_heart(38, 50, 8, (255, 183, 205))
-    sparkle(192, 46, 12, gold)
-    pygame.draw.circle(surf, (190, 220, 255), (46, 162), 6)
-    pygame.draw.circle(surf, (255, 205, 225), (196, 178), 5)
-    sparkle(30, 108, 7, (255, 240, 246))
+    # 背景小点缀（纯装饰，无肢体动作）
+    mini_heart(34, 44, 8, (255, 183, 205))
+    sparkle(192, 40, 12, gold)
+    pygame.draw.circle(surf, (190, 220, 255), (30, 168), 6)
+    pygame.draw.circle(surf, (255, 205, 225), (198, 172), 5)
+    sparkle(26, 108, 7, (255, 240, 246))
+    mini_heart(196, 132, 5, (255, 183, 205))
+    sparkle(38, 190, 6, gold)
 
-    # ---- 卷尾巴（身体后面）----
-    tail_pts = [(134, 172), (158, 176), (178, 158), (170, 136)]
-    for i in range(len(tail_pts) - 1):
-        capsule(tail_pts[i], tail_pts[i + 1], 20, ink)
-    for p in tail_pts:
-        pygame.draw.circle(surf, ink, p, 10)
-    for i in range(len(tail_pts) - 1):
-        capsule(tail_pts[i], tail_pts[i + 1], 12, WHITE)
-    for p in tail_pts:
-        pygame.draw.circle(surf, WHITE, p, 5)
-    # 尾巴三道虎斑
-    arc_about(150, 168, 8, 200, 330, fur_shade, 3)
-    arc_about(172, 150, 8, 250, 30, fur_shade, 3)
-    pygame.draw.line(surf, fur_shade, (166, 138), (174, 142), 3)
-
-    # ---- 耳朵（头后面）----
-    for tri in ([(62, 80), (72, 32), (106, 62)],
-                [(150, 80), (140, 32), (106, 62)]):
+    # ---- 两只耳朵（在头后面）----
+    for tri in ([(42, 96), (58, 22), (120, 52)],
+                [(178, 96), (162, 22), (100, 52)]):
         pygame.draw.polygon(surf, WHITE, tri)
         pygame.draw.polygon(surf, ink, tri, 4)
         cx = sum(p[0] for p in tri) / 3
@@ -516,116 +657,57 @@ def thumbs_cat_surface(size=200):
         inner = pygame.Surface((20, 18), pygame.SRCALPHA)
         pygame.draw.polygon(inner, (255, 194, 212),
                             [(2, 16), (10, 1), (18, 16)])
-        surf.blit(inner, (int(cx - 10), int(cy - 5)))
+        surf.blit(pygame.transform.smoothscale(inner, (30, 27)),
+                  (int(cx - 15), int(cy - 8)))
         # 耳尖一小撮绒毛
         tip = tri[1]
-        pygame.draw.line(surf, ink, (tip[0] - 4, tip[1] + 8),
-                         (tip[0] + 2, tip[1] + 2), 2)
+        pygame.draw.line(surf, ink, (tip[0] - 5, tip[1] + 10),
+                         (tip[0] + 3, tip[1] + 2), 2)
 
-    # ---- 坐姿身体 ----
-    body = pygame.Rect(0, 0, 92, 74)
-    body.center = (106, 170)
-    pygame.draw.ellipse(surf, ink, body)
-    pygame.draw.ellipse(surf, WHITE, body.inflate(-10, -10))
-    belly = pygame.Rect(0, 0, 50, 44)
-    belly.center = (106, 179)
-    pygame.draw.ellipse(surf, (255, 239, 245), belly)
-    # 身体两侧虎斑
-    pygame.draw.line(surf, fur_shade, (72, 158), (78, 166), 3)
-    pygame.draw.line(surf, fur_shade, (140, 158), (134, 166), 3)
-    # 两只小脚 + 脚趾线
-    for fx, side in ((80, -1), (132, 1)):
-        foot = pygame.Rect(0, 0, 30, 18)
-        foot.center = (fx, 203)
-        pygame.draw.ellipse(surf, ink, foot)
-        pygame.draw.ellipse(surf, WHITE, foot.inflate(-6, -6))
-        for k in (-1, 1):
-            pygame.draw.line(surf, soft_ink,
-                             (fx + k * 4, 200), (fx + k * 3, 206), 2)
-
-    # ---- 大圆头 ----
-    pygame.draw.circle(surf, ink, (106, 102), 55)
-    pygame.draw.circle(surf, WHITE, (106, 102), 49)
+    # ---- 大圆头（带立体明暗）----
+    pygame.draw.circle(surf, ink, (110, 116), 82)
+    pygame.draw.circle(surf, WHITE, (110, 116), 74)
+    # 右下内侧一弯柔和暗部 + 左上柔和高光，让脸更立体
+    pygame.draw.arc(surf, (238, 226, 238),
+                    pygame.Rect(110 - 68, 116 - 68, 136, 136),
+                    math.radians(-40), math.radians(80), 9)
+    hi = pygame.Surface((B, B), pygame.SRCALPHA)
+    pygame.draw.ellipse(hi, (255, 255, 255, 60), (46, 44, 84, 52))
+    surf.blit(hi, (0, 0))
     # 额头三道小虎斑
-    for dx in (-11, 0, 11):
-        pygame.draw.line(surf, fur_shade, (106 + dx, 56),
-                         (106 + dx, 66), 4)
+    for dx in (-15, 0, 15):
+        pygame.draw.line(surf, fur_shade, (110 + dx, 56),
+                         (110 + dx, 70), 5)
 
     # 大眼睛（椭圆黑瞳 + 大小双高光 + 睫毛）
-    for ex, side in ((88, -1), (124, 1)):
-        pygame.draw.ellipse(surf, ink, (ex - 11, 90, 22, 29))
-        pygame.draw.circle(surf, WHITE, (ex - 4, 98), 5)
-        pygame.draw.circle(surf, WHITE, (ex + 5, 107), 26 / 10)
-        # 上眼睫两笔
-        root = (ex + side * 8, 90)
-        pygame.draw.line(surf, ink, root,
-                         (ex + side * 16, 84), 2)
-        pygame.draw.line(surf, ink, (ex + side * 2, 86),
-                         (ex + side * 6, 79), 2)
+    for ex, side in ((88, -1), (132, 1)):
+        pygame.draw.ellipse(surf, ink, (ex - 14, 92, 28, 38))
+        pygame.draw.circle(surf, WHITE, (ex - 5, 102), 6)
+        pygame.draw.circle(surf, WHITE, (ex + 6, 116), 3)
+        pygame.draw.line(surf, ink, (ex + side * 10, 92),
+                         (ex + side * 20, 85), 2)
+        pygame.draw.line(surf, ink, (ex + side * 2, 88),
+                         (ex + side * 8, 80), 2)
     # 腮红（带高光）
-    for cx in (70, 142):
-        pygame.draw.ellipse(surf, pink, (cx - 12, 113, 24, 15))
-        pygame.draw.ellipse(surf, (255, 205, 218), (cx - 7, 115, 8, 5))
+    for cx in (64, 156):
+        pygame.draw.ellipse(surf, pink, (cx - 14, 130, 28, 18))
+        pygame.draw.ellipse(surf, (255, 205, 218), (cx - 8, 133, 9, 6))
     # 小三角鼻
     pygame.draw.polygon(surf, (255, 150, 175),
-                        [(101, 108), (111, 108), (106, 115)])
+                        [(104, 126), (116, 126), (110, 134)])
     # W 形小嘴
-    pygame.draw.line(surf, ink, (99, 120), (106, 125), 2)
-    pygame.draw.line(surf, ink, (106, 125), (113, 120), 2)
+    pygame.draw.line(surf, ink, (102, 141), (110, 147), 3)
+    pygame.draw.line(surf, ink, (110, 147), (118, 141), 3)
     # 胡须
     for side in (-1, 1):
-        for dy in (-5, 1, 7):
+        for dy in (-6, 1, 8):
             pygame.draw.line(surf, ink,
-                             (106 + side * 48, 104 + dy),
-                             (106 + side * 74, 100 + dy), 2)
+                             (110 + side * 58, 122 + dy),
+                             (110 + side * 88, 116 + dy), 2)
 
-    # ---- 左爪自然放下（带小肉垫）----
-    pygame.draw.circle(surf, ink, (68, 166), 13)
-    pygame.draw.circle(surf, WHITE, (68, 166), 9)
-    pygame.draw.circle(surf, pink_soft, (68, 167), 5)
-
-    # ============ 右侧举起的手臂 + 竖大拇指 ============
-    shoulder = (132, 152)
-    wrist = (156, 106)
-    # 手臂阴影边 + 白色手臂 + 高光
-    capsule(shoulder, wrist, 27, ink)
-    capsule(shoulder, wrist, 17, WHITE)
-    pygame.draw.line(surf, (255, 246, 250),
-                     (138, 144), (152, 114), 4)
-
-    # 拳头（ink 底 + 白色掌面）
-    fist = (160, 98)
-    pygame.draw.circle(surf, ink, fist, 22)
-    pygame.draw.circle(surf, WHITE, fist, 17)
-    # 拳头上蜷起的三根手指（三个小圆鼓包）
-    for fx, fy in ((178, 85), (184, 97), (178, 110)):
-        pygame.draw.circle(surf, ink, (fx, fy), 8)
-        pygame.draw.circle(surf, WHITE, (fx, fy), 5)
-    # 掌心粉色肉垫 + 两小趾垫
-    pygame.draw.ellipse(surf, pink_soft, (152, 100, 14, 11))
-    pygame.draw.circle(surf, pink_soft, (151, 98), 3)
-    pygame.draw.circle(surf, pink_soft, (158, 97), 3)
-
-    # 竖起的大拇指：ink 粗胶囊 + 白色内 + 指甲 + 关节褶皱
-    base, tip = (146, 94), (136, 58)
-    capsule(base, tip, 23, ink)
-    capsule(base, tip, 14, WHITE)
-    # 大拇指指甲（粉色圆角小椭圆）
-    nail = pygame.Surface((12, 10), pygame.SRCALPHA)
-    pygame.draw.ellipse(nail, pink_soft, nail.get_rect())
-    nail = pygame.transform.rotozoom(nail, -12, 1)
-    surf.blit(nail, nail.get_rect(center=(135, 66)))
-    # 大拇指关节褶皱
-    pygame.draw.line(surf, soft_ink, (140, 84), (148, 88), 2)
-
-    # 点赞动作弧线（大拇指左上方两条，强调举起的动作）
-    arc_about(116, 62, 16, 95, 150, soft_ink, 3)
-    arc_about(112, 66, 25, 105, 145, (170, 160, 185), 2)
-
-    # 大拇指旁星光
-    sparkle(198, 62, 9, gold)
-    mini_heart(202, 90, 5, (255, 183, 205))
-    pygame.draw.circle(surf, gold, (206, 78), 3)
+    # 头顶星光点缀
+    sparkle(110, 26, 9, gold)
+    pygame.draw.circle(surf, gold, (150, 34), 3)
 
     if size != B:
         surf = pygame.transform.smoothscale(surf, (size, size))
@@ -799,11 +881,14 @@ class PlayState:
     FLY_TIME = 0.38
     HIT_TIME = 0.45
 
-    def __init__(self, app, level, level_index=-1, seq=0, checkpoint=None):
+    def __init__(self, app, level, level_index=-1, seq=0, checkpoint=None,
+                 diff=0, timed=None):
         self.app = app
         self.level = level
         self.level_index = level_index  # -1 表示随机模式
         self.seq = seq
+        self.diff = diff      # 0=简单 1=中等 2=困难（随机模式无意义）
+        self.timed = timed    # 限时挑战秒数（None 表示非限时）
         self.session = GameSession(
             level["rows"], level["cols"], level["arrows"],
             time_limit=level["time_limit"], max_mistakes=level["mistakes"])
@@ -851,6 +936,7 @@ class PlayState:
         # 结算 / 暂停按钮
         self.btn_resume = Button((0, 0, 240, 64), "继续游戏", "mint", 26, "play")
         self.btn_restart_p = Button((0, 0, 240, 64), "重新开始", "blue", 26)
+        self.btn_set_p = Button((0, 0, 240, 64), "游戏设置", "purple", 24)
         self.btn_menu_p = Button((0, 0, 240, 64), "返回菜单", "gray", 24)
         self.btn_next = Button((0, 0, 220, 62), "下一关", "pink", 26)
         self.btn_replay = Button((0, 0, 200, 62), "再来一次", "mint", 24)
@@ -882,7 +968,7 @@ class PlayState:
 
     # ---------- 关卡进度保存 / 恢复 ----------
     def cp_key(self):
-        return self.app.checkpoint_key(self.level_index, self.seq)
+        return self.app.checkpoint_key(self.level_index, self.seq, self.diff)
 
     def has_mid_progress(self):
         """局面确实离开过初始状态时才有保存价值。"""
@@ -970,7 +1056,11 @@ class PlayState:
                 self.paused = False
             elif self.btn_restart_p.rect.collidepoint(event.pos):
                 s.play("click")
-                self.app.restart_play(self.level, self.level_index, self.seq)
+                self.app.restart_play(self.level, self.level_index, self.seq,
+                                      self.diff, self.timed)
+            elif self.btn_set_p.rect.collidepoint(event.pos):
+                s.play("click")
+                self.app.scene = "settings"  # 游戏保持挂起，返回后仍是暂停态
             elif self.btn_menu_p.rect.collidepoint(event.pos):
                 s.play("click")
                 self.save_and_menu()
@@ -1047,7 +1137,8 @@ class PlayState:
     def _start_fly(self, arrow):
         size = int(self.cell * 0.80)
         surf = rotated_arrow(size, arrow.direction,
-                             face=DIRECTION_FACE[arrow.direction])
+                             face=self.app.arrow_face(arrow.direction),
+                             colors=self.app.arrow_colors(arrow.direction))
         cr = self.cell_rect(arrow.row, arrow.col)
         x, y = cr.center
         if arrow.direction == Direction.RIGHT:
@@ -1138,7 +1229,8 @@ class PlayState:
                     self._rain_one()
                 if self.result_delay > 0.8 and self.level_index >= 0 and not self.saved:
                     self.saved = True
-                    self.app.save_result(self.level_index, self.session.stars(),
+                    self.app.save_result(f"{self.level_index}:{self.diff}",
+                                         self.level_index, self.session.stars(),
                                          self.session.score)
 
     def _rain_one(self):
@@ -1302,8 +1394,9 @@ class PlayState:
                          if close_t > 0 else 0.0)
 
             img = rotated_arrow(int(arrow_size * scale), arrow.direction,
-                                face=DIRECTION_FACE[arrow.direction],
-                                blink=blink, mood=mood)
+                                face=self.app.arrow_face(arrow.direction),
+                                blink=blink, mood=mood,
+                                colors=self.app.arrow_colors(arrow.direction))
             rect_img = img.get_rect(center=(rect.centerx, rect.centery + int(bob)))
             surf.blit(img, rect_img)
 
@@ -1347,14 +1440,14 @@ class PlayState:
 
     def _draw_pause(self, surf, dt):
         self._dim(surf)
-        panel = jelly_surface(440, 460, (255, 255, 255), (236, 242, 255),
+        panel = jelly_surface(440, 560, (255, 255, 255), (236, 242, 255),
                               radius=32, shadow=12)
         pr = panel.get_rect(center=(WIDTH // 2, HEIGHT // 2))
         surf.blit(panel, pr)
         title = get_font(40).render("游戏暂停", True, INK)
-        surf.blit(title, title.get_rect(center=(WIDTH // 2, pr.top + 80)))
-        btns = [self.btn_resume, self.btn_restart_p, self.btn_menu_p]
-        labels_y = [pr.top + 170, pr.top + 260, pr.top + 350]
+        surf.blit(title, title.get_rect(center=(WIDTH // 2, pr.top + 74)))
+        btns = [self.btn_resume, self.btn_restart_p, self.btn_set_p, self.btn_menu_p]
+        labels_y = [pr.top + 138, pr.top + 214, pr.top + 290, pr.top + 366]
         for b, y in zip(btns, labels_y):
             b.rect.center = (WIDTH // 2, y)
             b.draw(surf, dt)
@@ -1448,18 +1541,20 @@ class PlayState:
             if self.btn_next.enabled and self.btn_next.rect.collidepoint(pos):
                 s.play("click")
                 if self.level_index < 0:
-                    self.app.start_random(self.seq + 1)
+                    self.app.start_random(self.seq + 1, self.timed)
                 else:
-                    self.app.start_level(self.level_index + 1)
+                    self.app.start_level(self.level_index + 1, self.diff)
                 return
             if self.btn_replay.rect.collidepoint(pos):
                 s.play("click")
-                self.app.restart_play(self.level, self.level_index, self.seq)
+                self.app.restart_play(self.level, self.level_index, self.seq,
+                                      self.diff, self.timed)
                 return
         else:
             if self.btn_replay.rect.collidepoint(pos):
                 s.play("click")
-                self.app.restart_play(self.level, self.level_index, self.seq)
+                self.app.restart_play(self.level, self.level_index, self.seq,
+                                      self.diff, self.timed)
                 return
         if self.btn_menu_r.rect.collidepoint(pos):
             s.play("click")
@@ -1493,25 +1588,77 @@ class App:
         self.bg = DreamScene(WIDTH, HEIGHT)
         self.levels = all_levels()
         self.save = self._load_save()
+        self.sounds.set_master(float(self.save.get("volume", 1.0)))
         if self.save.get("muted"):
             self.sounds.muted = True
         self.scene = "menu"
         self.play: PlayState | None = None
         self.t = 0.0
         self.mouse = (0, 0)
+        self.timed_mode = None   # 当前限时挑战秒数（随机模式用）
+        self._level_cache = {}   # (关卡序号, 难度) -> 关卡数据
         self._build_menu_ui()
         self._build_help_ui()
         self._build_select_ui()
+        self._build_pick_ui()
+        self._build_settings_ui()
         self.btn_mute = Button((WIDTH - 92, 24, 68, 48), "", "purple", 20)
+
+    # ---------- 个性化设置读取 ----------
+    # 方向 -> 存档键名
+    DIR_KEY = {
+        Direction.UP: "up",
+        Direction.DOWN: "down",
+        Direction.LEFT: "left",
+        Direction.RIGHT: "right",
+    }
+
+    def arrow_colors(self, direction):
+        """指定方向的箭头配色（None = 经典四色，随方向变色）。"""
+        i = self.save.get("arrow_colors", {}).get(self.DIR_KEY[direction], 0)
+        return ARROW_COLORS[i][1]
+
+    def arrow_face(self, direction):
+        """指定方向的箭头表情（classic = 按方向自动搭配）。"""
+        f = self.save.get("faces", {}).get(self.DIR_KEY[direction], "classic")
+        return DIRECTION_FACE[direction] if f == "classic" else f
 
     # ---------- 存档 ----------
     def _load_save(self):
         try:
             with open(SAVE_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
         except Exception:
-            return {"unlocked": 1, "stars": {}, "best": {},
-                    "muted": False, "checkpoints": {}}
+            return {"unlocked": 1, "stars": {}, "best": {}, "muted": False,
+                    "checkpoints": {}, "volume": 1.0,
+                    "arrow_colors": {"up": 0, "down": 0, "left": 0, "right": 0},
+                    "faces": {"up": "classic", "down": "classic",
+                              "left": "classic", "right": "classic"}}
+        data.setdefault("unlocked", 1)
+        data.setdefault("stars", {})
+        data.setdefault("best", {})
+        data.setdefault("muted", False)
+        data.setdefault("checkpoints", {})
+        data.setdefault("volume", 1.0)
+        # 旧版全局配色/表情迁移为四个方向各一份；缺失的方向补默认值
+        old_c = data.pop("arrow_color", 0)
+        old_f = data.pop("face", "classic")
+        colors = data.setdefault("arrow_colors", {})
+        faces = data.setdefault("faces", {})
+        for k in ("up", "down", "left", "right"):
+            colors[k] = colors.get(k, old_c)
+            faces[k] = faces.get(k, old_f)
+        # 旧版进度按无难度键名保存：星级/最佳迁移到「中等」难度键；旧中途存档布局
+        # 与新难度棋盘不匹配，直接丢弃
+        for k in [k for k in data["stars"] if k.isdigit()]:
+            nk = f"{k}:1"
+            data["stars"][nk] = max(data["stars"].pop(k), data["stars"].get(nk, 0))
+        for k in [k for k in data["best"] if k.isdigit()]:
+            nk = f"{k}:1"
+            data["best"][nk] = max(data["best"].pop(k), data["best"].get(nk, 0))
+        for k in [k for k in data["checkpoints"] if k.isdigit()]:
+            del data["checkpoints"][k]
+        return data
 
     def _write_save(self):
         try:
@@ -1520,8 +1667,8 @@ class App:
         except Exception:
             pass
 
-    def save_result(self, index, stars, score):
-        key = str(index)
+    def save_result(self, key, index, stars, score):
+        """key 形如 '2:1'（第 3 关·中等）。星级/最佳按难度分别记录。"""
         if stars > self.save["stars"].get(key, 0):
             self.save["stars"][key] = stars
         if score > self.save["best"].get(key, 0):
@@ -1531,9 +1678,11 @@ class App:
         self._write_save()
 
     # ---------- 关卡进度存档 ----------
-    def checkpoint_key(self, level_index, seq=0):
-        """固定关卡用序号，随机模式统一用 'random'（只保留最近一局）。"""
-        return "random" if level_index < 0 else str(level_index)
+    def checkpoint_key(self, level_index, seq=0, diff=0):
+        """固定关卡用 '序号:难度'，随机模式按时限区分（只保留最近一局）。"""
+        if level_index < 0:
+            return "random" if self.timed_mode is None else f"random:{self.timed_mode}"
+        return f"{level_index}:{diff}"
 
     def get_checkpoint(self, key):
         return self.save.get("checkpoints", {}).get(key)
@@ -1554,38 +1703,51 @@ class App:
             self._write_save()
 
     # ---------- 场景跳转 ----------
-    def start_level(self, index):
+    def _get_difficulty_level(self, index, diff):
+        key = (index, diff)
+        if key not in self._level_cache:
+            self._level_cache[key] = build_difficulty_level(index, diff)
+        return self._level_cache[key]
+
+    def start_level(self, index, diff=0):
         if index >= len(self.levels):
             self.go_select()
             return
-        checkpoint = self.get_checkpoint(str(index))
-        self.play = PlayState(self, self.levels[index], level_index=index,
+        self.timed_mode = None
+        level = self._get_difficulty_level(index, diff)
+        checkpoint = self.get_checkpoint(f"{index}:{diff}")
+        self.play = PlayState(self, level, level_index=index, diff=diff,
                               checkpoint=checkpoint)
         self.scene = "play"
 
-    def start_random(self, seq=0):
-        checkpoint = self.get_checkpoint("random")
+    def start_random(self, seq=0, timed=None):
+        self.timed_mode = timed
+        key = "random" if timed is None else f"random:{timed}"
+        checkpoint = self.get_checkpoint(key)
         if checkpoint is not None:
             try:
                 level = level_from_data(checkpoint["level"])
                 self.play = PlayState(self, level, level_index=-1, seq=seq,
-                                      checkpoint=checkpoint)
+                                      timed=timed, checkpoint=checkpoint)
                 self.scene = "play"
                 return
             except Exception:
                 # 保存的关卡布局损坏：丢弃后按全新随机处理
-                self.clear_checkpoint("random")
+                self.clear_checkpoint(key)
         level = make_random_level(seq)
-        self.play = PlayState(self, level, level_index=-1, seq=seq)
+        if timed:
+            level["time_limit"] = float(timed)
+            level["name"] = f"限时挑战·{timed}秒"
+        self.play = PlayState(self, level, level_index=-1, seq=seq, timed=timed)
         self.scene = "play"
 
-    def restart_play(self, level, index, seq):
+    def restart_play(self, level, index, seq, diff=0, timed=None):
         # 主动选择“重新开始”：旧进度立即作废，避免再次弹询问
-        self.clear_checkpoint(self.checkpoint_key(index, seq))
+        self.clear_checkpoint(self.checkpoint_key(index, seq, diff))
         if index < 0:
-            self.start_random(seq)
+            self.start_random(seq, timed)
         else:
-            self.start_level(index)
+            self.start_level(index, diff)
 
     def go_menu(self):
         self.scene = "menu"
@@ -1593,6 +1755,8 @@ class App:
 
     def go_select(self):
         self._build_select_ui()
+        self.pick_level = None
+        self.pick_timed = False
         self.scene = "select"
         self.play = None
 
@@ -1602,7 +1766,9 @@ class App:
                                 "pink", 30, "play")
         self.btn_help = Button((WIDTH // 2 - 150, 522, 300, 66), "玩法说明",
                                "mint", 26)
-        self.btn_quit = Button((WIDTH // 2 - 150, 608, 300, 66), "退出游戏",
+        self.btn_settings = Button((WIDTH // 2 - 150, 608, 300, 66), "游戏设置",
+                                   "blue", 26)
+        self.btn_quit = Button((WIDTH // 2 - 150, 694, 300, 66), "退出游戏",
                                "purple", 26)
 
     def _build_help_ui(self):
@@ -1612,8 +1778,189 @@ class App:
     def _build_select_ui(self):
         self.cards = []
         self.btn_select_back = Button((36, 30, 110, 52), "返回", "gray", 22, "back")
-        self.btn_select_random = Button((WIDTH - 268, 30, 168, 52), "随机挑战",
+        self.btn_select_random = Button((WIDTH - 452, 30, 168, 52), "随机挑战",
                                         "orange", 22, "dice")
+        self.btn_select_timed = Button((WIDTH - 268, 30, 168, 52), "限时挑战",
+                                       "pink", 22)
+
+    def _build_pick_ui(self):
+        # 难度选择弹窗（点击关卡卡片后弹出）
+        n_easy = round(25 * 0.55)
+        n_mid = round(36 * 0.70)
+        n_hard = round(49 * 0.88)
+        self.diff_btns = [
+            Button((0, 0, 300, 62), f"简单  5×5 · {n_easy} 支箭头", "mint", 22),
+            Button((0, 0, 300, 62), f"中等  6×6 · {n_mid} 支箭头", "orange", 22),
+            Button((0, 0, 300, 62), f"困难  7×7 · {n_hard} 支箭头", "pink", 22),
+        ]
+        self.btn_pick_cancel = Button((0, 0, 150, 46), "取消", "gray", 20)
+        # 限时挑战弹窗
+        self.timed_btns = [
+            Button((0, 0, 300, 58), "15 秒 · 手速挑战", "pink", 22),
+            Button((0, 0, 300, 58), "20 秒 · 飞快消除", "orange", 22),
+            Button((0, 0, 300, 58), "30 秒 · 从容一些", "blue", 22),
+            Button((0, 0, 300, 58), "不限时 · 放松模式", "mint", 20),
+        ]
+        self.btn_timed_cancel = Button((0, 0, 150, 46), "取消", "gray", 20)
+        self.pick_level = None   # None / 关卡序号（难度弹窗）
+        self.pick_timed = False  # 限时选择弹窗
+
+    def _build_settings_ui(self):
+        self.btn_settings_back = Button((WIDTH // 2 - 110, 758, 220, 56), "返回",
+                                        "gray", 24, "back")
+        self.slider_rect = pygame.Rect(296, 216, 430, 16)
+        self.drag_volume = False
+        self.set_dir = Direction.RIGHT  # 当前正在设置的方向
+        # 方向选择行（点击后下方的颜色/表情只作用于该方向）
+        self.dir_rects = []
+        dw, dgap = 100, 16
+        dx0 = (WIDTH - (dw * 4 + dgap * 3)) // 2
+        for i, d in enumerate(Direction):
+            self.dir_rects.append(
+                pygame.Rect(dx0 + i * (dw + dgap), 258, dw, 76))
+        self.color_rects = []
+        cw, gap = 50, 12
+        x0 = (WIDTH - (cw * len(ARROW_COLORS) + gap * (len(ARROW_COLORS) - 1))) // 2
+        for i in range(len(ARROW_COLORS)):
+            self.color_rects.append(pygame.Rect(x0 + i * (cw + gap), 390, cw, cw))
+        self.face_rects = []
+        fw, fgap = 92, 12
+        fx0 = (WIDTH - (fw * 6 + fgap * 5)) // 2
+        for i in range(len(FACE_OPTIONS)):
+            r, c = divmod(i, 6)
+            self.face_rects.append(
+                pygame.Rect(fx0 + c * (fw + fgap), 490 + r * (fw + fgap), fw, fw))
+
+    def _set_volume_from_mouse(self, x):
+        v = (x - self.slider_rect.x) / self.slider_rect.w
+        self.save["volume"] = round(min(1.0, max(0.0, v)), 2)
+        self.sounds.set_master(self.save["volume"])
+
+    def _settings_event(self, event):
+        s = self.sounds
+        if self.btn_settings_back.handle_event(event, s):
+            # 从暂停面板进来时回到对局（保持暂停），否则回主菜单
+            self.scene = "play" if self.play is not None else "menu"
+            return
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            hit = self.slider_rect.inflate(16, 30)
+            if hit.collidepoint(event.pos):
+                self.drag_volume = True
+                self._set_volume_from_mouse(event.pos[0])
+                return
+            for i, rect in enumerate(self.dir_rects):
+                if rect.collidepoint(event.pos):
+                    self.set_dir = list(Direction)[i]
+                    s.play("click")
+                    return
+            for i, rect in enumerate(self.color_rects):
+                if rect.collidepoint(event.pos):
+                    self.save["arrow_colors"][self.DIR_KEY[self.set_dir]] = i
+                    self._write_save()
+                    s.play("click")
+                    return
+            for i, rect in enumerate(self.face_rects):
+                if rect.collidepoint(event.pos):
+                    self.save["faces"][self.DIR_KEY[self.set_dir]] = FACE_OPTIONS[i][0]
+                    self._write_save()
+                    s.play("star")
+                    return
+        elif event.type == pygame.MOUSEMOTION and self.drag_volume:
+            self._set_volume_from_mouse(event.pos[0])
+        elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            if self.drag_volume:
+                self.drag_volume = False
+                s.play("click")
+                self._write_save()
+
+    def _draw_settings(self, dt):
+        panel = jelly_surface(840, 760, (255, 255, 255), (238, 244, 255),
+                              radius=34, shadow=14)
+        pr = panel.get_rect(center=(WIDTH // 2, 465))
+        self.screen.blit(panel, pr)
+        title = get_font(42).render("游戏设置", True, (134, 92, 224))
+        self.screen.blit(title, title.get_rect(center=(WIDTH // 2, pr.top + 52)))
+
+        # ---- 音量滑动条 ----
+        lab = get_font(24).render("音量", True, INK)
+        self.screen.blit(lab, (pr.x + 80, 182))
+        track = self.slider_rect
+        pygame.draw.rect(self.screen, (226, 230, 244), track, border_radius=8)
+        frac = float(self.save.get("volume", 1.0))
+        if frac > 0:
+            fill = track.copy()
+            fill.width = max(14, int(track.w * frac))
+            pygame.draw.rect(self.screen, (134, 92, 224), fill, border_radius=8)
+        kx, ky = track.x + int(track.w * frac), track.centery
+        kr = 16 if self.drag_volume else 14
+        pygame.draw.circle(self.screen, WHITE, (kx, ky), kr)
+        pygame.draw.circle(self.screen, (134, 92, 224), (kx, ky), kr,
+                           max(3, kr // 4))
+        pct = get_font(22).render(f"{int(round(frac * 100))}%", True, (120, 110, 150))
+        self.screen.blit(pct, (track.right + 24, ky - pct.get_height() // 2))
+
+        # ---- 方向选择（颜色/表情作用于所选方向） ----
+        lab = get_font(24).render("箭头方向", True, INK)
+        self.screen.blit(lab, (pr.x + 80, 230))
+        dir_names = {Direction.UP: "上", Direction.DOWN: "下",
+                     Direction.LEFT: "左", Direction.RIGHT: "右"}
+        for i, d in enumerate(Direction):
+            rect = self.dir_rects[i]
+            cell = jelly_surface(rect.w, rect.h, (255, 255, 255), (240, 246, 255),
+                                 radius=18, shadow=4, outline=(214, 226, 248))
+            self.screen.blit(cell, rect)
+            img = rotated_arrow(44, d, face=self.arrow_face(d),
+                                colors=self.arrow_colors(d))
+            self.screen.blit(img, img.get_rect(center=(rect.centerx, rect.y + 28)))
+            txt = get_font(15, bold=(self.set_dir == d)).render(dir_names[d], True, INK)
+            self.screen.blit(txt, txt.get_rect(center=(rect.centerx, rect.bottom - 14)))
+            if self.set_dir == d:
+                pygame.draw.rect(self.screen, (134, 92, 224),
+                                 rect.inflate(8, 8), width=4, border_radius=22)
+
+        # ---- 箭头颜色 ----
+        lab = get_font(24).render("箭头颜色", True, INK)
+        self.screen.blit(lab, (pr.x + 80, 362))
+        sel_color = self.save["arrow_colors"][self.DIR_KEY[self.set_dir]]
+        for i, (name, pair) in enumerate(ARROW_COLORS):
+            rect = self.color_rects[i]
+            if pair is None:  # 经典四色：2×2 小色块
+                base = jelly_surface(rect.w, rect.h, (255, 255, 255), (238, 240, 250),
+                                     radius=16, shadow=4, outline=(214, 226, 248))
+                self.screen.blit(base, rect)
+                for j, (ct, cb) in enumerate(DIR_STYLE.values()):
+                    sub = pygame.Rect(rect.x + 5 + (j % 2) * (rect.w // 2 - 3),
+                                      rect.y + 5 + (j // 2) * (rect.h // 2 - 3),
+                                      rect.w // 2 - 6, rect.h // 2 - 6)
+                    mini = jelly_surface(sub.w, sub.h, ct, cb, radius=8, shadow=0)
+                    self.screen.blit(mini, sub)
+            else:
+                top, bottom = pair
+                body = jelly_surface(rect.w, rect.h, top, bottom, radius=16, shadow=4)
+                self.screen.blit(body, rect)
+            if sel_color == i:
+                pygame.draw.rect(self.screen, (134, 92, 224),
+                                 rect.inflate(10, 10), width=4, border_radius=20)
+
+        # ---- 箭头表情 ----
+        lab = get_font(24).render("箭头表情", True, INK)
+        self.screen.blit(lab, (pr.x + 80, 462))
+        sel_face = self.save["faces"][self.DIR_KEY[self.set_dir]]
+        for i, (key, name) in enumerate(FACE_OPTIONS):
+            rect = self.face_rects[i]
+            cell = jelly_surface(rect.w, rect.h, (255, 255, 255), (240, 246, 255),
+                                 radius=18, shadow=4, outline=(214, 226, 248))
+            self.screen.blit(cell, rect)
+            img = rotated_arrow(52, Direction.RIGHT,
+                                face=DIRECTION_FACE[self.set_dir] if key == "classic" else key,
+                                colors=self.arrow_colors(self.set_dir))
+            self.screen.blit(img, img.get_rect(center=(rect.centerx, rect.y + 32)))
+            txt = get_font(15, bold=(sel_face == key)).render(name, True, INK)
+            self.screen.blit(txt, txt.get_rect(center=(rect.centerx, rect.bottom - 15)))
+            if sel_face == key:
+                pygame.draw.rect(self.screen, (134, 92, 224),
+                                 rect.inflate(8, 8), width=4, border_radius=22)
+        self.btn_settings_back.draw(self.screen, dt)
 
     # ---------- 主循环 ----------
     def run(self):
@@ -1644,12 +1991,16 @@ class App:
                 self.go_select()
             elif self.btn_help.handle_event(event, self.sounds):
                 self.scene = "help"
+            elif self.btn_settings.handle_event(event, self.sounds):
+                self.scene = "settings"
             elif self.btn_quit.handle_event(event, self.sounds):
                 pygame.quit()
                 sys.exit(0)
         elif self.scene == "help":
             if self.btn_help_back.handle_event(event, self.sounds):
                 self.scene = "menu"
+        elif self.scene == "settings":
+            self._settings_event(event)
         elif self.scene == "select":
             self._select_event(event)
         elif self.scene == "play":
@@ -1671,8 +2022,34 @@ class App:
 
     def _select_event(self, event):
         s = self.sounds
+        # 弹窗打开时只响应弹窗内部
+        if self.pick_level is not None:
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                for i, b in enumerate(self.diff_btns):
+                    if b.rect.collidepoint(event.pos):
+                        idx = self.pick_level
+                        self.pick_level = None
+                        self.start_level(idx, i)
+                        return
+                if self.btn_pick_cancel.rect.collidepoint(event.pos):
+                    s.play("click")
+                    self.pick_level = None
+            return
+        if self.pick_timed:
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                for i, b in enumerate(self.timed_btns):
+                    if b.rect.collidepoint(event.pos):
+                        self.pick_timed = False
+                        self.start_random(0, timed=(15, 20, 30, None)[i])
+                        return
+                if self.btn_timed_cancel.rect.collidepoint(event.pos):
+                    s.play("click")
+                    self.pick_timed = False
+            return
+
         self.btn_select_back.handle_event(event, s)
         self.btn_select_random.handle_event(event, s)
+        self.btn_select_timed.handle_event(event, s)
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             if self.btn_select_back.rect.collidepoint(event.pos):
                 self.scene = "menu"
@@ -1680,20 +2057,23 @@ class App:
             if self.btn_select_random.rect.collidepoint(event.pos):
                 self.start_random(0)
                 return
+            if self.btn_select_timed.rect.collidepoint(event.pos):
+                self.pick_timed = True
+                return
             for i, level in enumerate(self.levels):
                 rect = self._card_rect(i)
                 if rect.collidepoint(event.pos):
                     unlocked = i + 1 <= self.save.get("unlocked", 1)
                     if unlocked:
                         s.play("click")
-                        self.start_level(i)
+                        self.pick_level = i
                     else:
                         s.play("collide")
 
     # ---------- 绘制分发 ----------
     def _day_progress(self):
-        """天色 30 秒完成一次早晨到夜晚的更替，到夜晚后重新循环。"""
-        return (self.t % 30.0) / 30.0
+        """天色 10 秒完成一次早晨到夜晚的更替，到夜晚后重新循环。"""
+        return (self.t % 10.0) / 10.0
 
     def draw(self, dt):
         self.bg.draw(self.screen, self.t, self._day_progress())
@@ -1701,6 +2081,8 @@ class App:
             self._draw_menu(dt)
         elif self.scene == "help":
             self._draw_help(dt)
+        elif self.scene == "settings":
+            self._draw_settings(dt)
         elif self.scene == "select":
             self._draw_select(dt)
         elif self.scene == "play":
@@ -1719,11 +2101,11 @@ class App:
 
     # ---------- 主菜单 ----------
     def _draw_menu(self, dt):
-        # 装饰：四只表情各异的漂浮大箭头（喜 / 怒 / 哀 / 乐）
-        faces = ["happy", "angry", "sad", "joy"]
+        # 装饰：四只表情各异的漂浮大箭头（实时预览各自方向的配色与表情设置）
         for i, d in enumerate(Direction):
             size = 100
-            img = rotated_arrow(size, d, face=faces[i])
+            img = rotated_arrow(size, d, face=self.arrow_face(d),
+                                colors=self.arrow_colors(d))
             phase = self.t * 0.9 + i * 1.7
             x = 150 + i * 206 + math.sin(phase) * 16
             y = 150 + math.cos(phase * 0.8) * 20
@@ -1746,6 +2128,7 @@ class App:
 
         self.btn_start.draw(self.screen, dt)
         self.btn_help.draw(self.screen, dt)
+        self.btn_settings.draw(self.screen, dt)
         self.btn_quit.draw(self.screen, dt)
 
     # ---------- 玩法说明 ----------
@@ -1798,13 +2181,18 @@ class App:
         x = WIDTH // 2 - title.get_width() // 2
         self.screen.blit(ot, (x + 3, 103))
         self.screen.blit(title, (x, 100))
+        sub = get_font(19).render("点击关卡卡片，选择 简单 / 中等 / 困难 难度开始",
+                                  True, INK)
+        self.screen.blit(sub, sub.get_rect(center=(WIDTH // 2, 158)))
         self.btn_select_back.draw(self.screen, dt)
         self.btn_select_random.draw(self.screen, dt)
+        self.btn_select_timed.draw(self.screen, dt)
 
         for i, level in enumerate(self.levels):
             rect = self._card_rect(i)
             unlocked = i + 1 <= self.save.get("unlocked", 1)
-            hover = unlocked and rect.collidepoint(self.mouse)
+            hover = unlocked and self.pick_level is None and not self.pick_timed \
+                and rect.collidepoint(self.mouse)
             offset = 6 if hover else 0
             style = ["pink", "mint", "blue", "orange", "purple", "pink"][i]
             top, bottom = BUTTON_STYLE[style]
@@ -1814,16 +2202,18 @@ class App:
                                  gloss=True)
             self.screen.blit(card, (rect.x, rect.y + 4 + offset))
             num = get_font(40).render(f"第 {i + 1} 关", True, WHITE)
-            self.screen.blit(num, num.get_rect(center=(rect.centerx, rect.y + 50 + offset)))
+            self.screen.blit(num, num.get_rect(center=(rect.centerx, rect.y + 44 + offset)))
             name = get_font(22).render(level["name"], True, WHITE)
-            self.screen.blit(name, name.get_rect(center=(rect.centerx, rect.y + 96 + offset)))
+            self.screen.blit(name, name.get_rect(center=(rect.centerx, rect.y + 90 + offset)))
             if unlocked:
-                stars = self.save["stars"].get(str(i), 0)
+                # 星级/最佳取三种难度的最好成绩
+                stars = max(self.save["stars"].get(f"{i}:{d}", 0) for d in range(3))
                 for k in range(3):
                     s = star_surface(30, gray=k >= stars)
                     self.screen.blit(s, s.get_rect(
-                        center=(rect.centerx + (k - 1) * 38, rect.y + 140 + offset)))
-                best = self.save["best"].get(str(i))
+                        center=(rect.centerx + (k - 1) * 38, rect.y + 138 + offset)))
+                best = max((self.save["best"].get(f"{i}:{d}", 0) for d in range(3)),
+                           default=0)
                 if best:
                     bt = get_font(15).render(f"最佳 {best}", True, WHITE)
                     self.screen.blit(bt, bt.get_rect(center=(rect.centerx,
@@ -1834,6 +2224,48 @@ class App:
                 pygame.draw.rect(lock, WHITE, (4, 19, 36, 22), border_radius=7)
                 pygame.draw.circle(lock, (150, 155, 178), (22, 28), 3.5)
                 self.screen.blit(lock, lock.get_rect(center=(rect.centerx, rect.y + 142 + offset)))
+
+        if self.pick_level is not None:
+            self._draw_diff_pick(dt)
+        elif self.pick_timed:
+            self._draw_timed_pick(dt)
+
+    def _draw_diff_pick(self, dt):
+        d = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        d.fill((70, 50, 110, 150))
+        self.screen.blit(d, (0, 0))
+        panel = jelly_surface(560, 430, (255, 255, 255), (236, 242, 255),
+                              radius=32, shadow=12)
+        pr = panel.get_rect(center=(WIDTH // 2, HEIGHT // 2))
+        self.screen.blit(panel, pr)
+        name = self.levels[self.pick_level]["name"]
+        title = get_font(32).render(f"第 {self.pick_level + 1} 关 · 选择难度", True, INK)
+        self.screen.blit(title, title.get_rect(center=(WIDTH // 2, pr.top + 62)))
+        tip = get_font(19).render(f"「{name}」三种棋盘规格，箭头越多越烧脑", True, (130, 120, 160))
+        self.screen.blit(tip, tip.get_rect(center=(WIDTH // 2, pr.top + 104)))
+        for i, b in enumerate(self.diff_btns):
+            b.rect.center = (WIDTH // 2, pr.top + 170 + i * 76)
+            b.draw(self.screen, dt)
+        self.btn_pick_cancel.rect.center = (WIDTH // 2, pr.bottom - 52)
+        self.btn_pick_cancel.draw(self.screen, dt)
+
+    def _draw_timed_pick(self, dt):
+        d = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        d.fill((70, 50, 110, 150))
+        self.screen.blit(d, (0, 0))
+        panel = jelly_surface(560, 540, (255, 255, 255), (255, 240, 250),
+                              radius=32, shadow=12)
+        pr = panel.get_rect(center=(WIDTH // 2, HEIGHT // 2))
+        self.screen.blit(panel, pr)
+        title = get_font(32).render("限时挑战", True, (232, 62, 130))
+        self.screen.blit(title, title.get_rect(center=(WIDTH // 2, pr.top + 60)))
+        tip = get_font(19).render("在倒计时归零前清空全部箭头！", True, (130, 120, 160))
+        self.screen.blit(tip, tip.get_rect(center=(WIDTH // 2, pr.top + 102)))
+        for i, b in enumerate(self.timed_btns):
+            b.rect.center = (WIDTH // 2, pr.top + 158 + i * 72)
+            b.draw(self.screen, dt)
+        self.btn_timed_cancel.rect.center = (WIDTH // 2, pr.bottom - 52)
+        self.btn_timed_cancel.draw(self.screen, dt)
 
 
 def main():
