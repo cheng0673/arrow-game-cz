@@ -1,9 +1,9 @@
 @echo off
 chcp 65001 >nul
-title 一箭又一箭
+title 重生之我是箭神
 cd /d "%~dp0"
 echo ============================================
-echo   一箭又一箭 - 环境检查与启动
+echo   重生之我是箭神 - 环境检查与启动
 echo ============================================
 python --version
 if errorlevel 1 (

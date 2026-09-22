@@ -39,7 +39,12 @@ from sounds import SoundManager
 # ============================== 基础配置 ==============================
 WIDTH, HEIGHT = 920, 920
 FPS = 120
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# PyInstaller 打包后 __file__ 位于临时解压目录（_MEIPASS），
+# 存档必须锚定 exe 所在目录，否则退出后进度丢失
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SAVE_PATH = os.path.join(BASE_DIR, "save.json")
 
 # 糖果配色（鲜艳）
@@ -1688,8 +1693,7 @@ class App:
         self.mouse = (0, 0)
         self.timed_mode = None   # 当前限时挑战秒数（随机模式用）
         self._level_cache = {}   # (主题, 关卡序号, 难度) -> 关卡数据
-        self._shape_cache_path = os.path.join(os.path.dirname(__file__),
-                                               "_shape_cache.json")
+        self._shape_cache_path = os.path.join(BASE_DIR, "_shape_cache.json")
         self._shape_disk_cache = self._load_shape_cache()
         self.cur_theme = THEME_DEFAULT
         self._build_menu_ui()

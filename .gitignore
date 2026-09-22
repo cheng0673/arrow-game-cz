@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 save.json
 _shape_cache.json
+
+# PyInstaller 打包产物
+build/
+dist/
+*.spec
