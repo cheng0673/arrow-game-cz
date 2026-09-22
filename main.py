@@ -20,7 +20,8 @@ from datetime import datetime
 import pygame
 
 from levels import (all_levels, all_shape_levels, build_difficulty_level,
-                     build_shape_level, make_random_level)
+                     build_shape_level, make_random_level,
+                     FRUIT_PATTERNS, ANIMAL_PATTERNS)
 
 # 三个棋盘主题：默认矩形关卡 / 水果异形 / 动物异形
 THEME_DEFAULT = "default"
@@ -1687,6 +1688,9 @@ class App:
         self.mouse = (0, 0)
         self.timed_mode = None   # 当前限时挑战秒数（随机模式用）
         self._level_cache = {}   # (主题, 关卡序号, 难度) -> 关卡数据
+        self._shape_cache_path = os.path.join(os.path.dirname(__file__),
+                                               "_shape_cache.json")
+        self._shape_disk_cache = self._load_shape_cache()
         self.cur_theme = THEME_DEFAULT
         self._build_menu_ui()
         self._build_help_ui()
@@ -1695,9 +1699,37 @@ class App:
         self._build_pick_ui()
         self._build_settings_ui()
         self._build_boot_ui()
-        self.btn_mute = Button((WIDTH - 92, 24, 68, 48), "", "purple", 20)
+        self.btn_mute = Button((WIDTH - 76, 30, 52, 52), "", "purple", 20)
         # 有历史进度时启动先询问「继续 / 从头开始」，否则直接进主菜单
         self.scene = "boot" if self._has_progress() else "menu"
+
+    @staticmethod
+    def _shape_cache_version():
+        """用图案内容 hash 作版本号——图案一改，旧缓存自动失效。"""
+        import hashlib
+        blob = repr(FRUIT_PATTERNS) + repr(ANIMAL_PATTERNS)
+        return hashlib.md5(blob.encode()).hexdigest()[:12]
+
+    def _load_shape_cache(self):
+        """从磁盘加载异形关卡缓存，避免每次启动重新生成。"""
+        try:
+            with open(self._shape_cache_path, encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("version") != self._shape_cache_version():
+                return {}
+            return data.get("levels", {})
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def _save_shape_cache(self):
+        """把异形关卡缓存写入磁盘（带版本号）。"""
+        try:
+            data = {"version": self._shape_cache_version(),
+                    "levels": self._shape_disk_cache}
+            with open(self._shape_cache_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+        except OSError:
+            pass
 
     def theme_meta(self, theme):
         """获取水果/动物主题的形状元数据（懒加载缓存）。"""
@@ -1866,8 +1898,17 @@ class App:
             return
         self.timed_mode = None
         key = (theme, index, diff)
+        cache_key = f"{theme}_{index}_{diff}"
         if key not in self._level_cache:
-            self._level_cache[key] = build_shape_level(theme, index, diff)
+            # 先查磁盘缓存，避免重新生成
+            if cache_key in self._shape_disk_cache:
+                self._level_cache[key] = level_from_data(
+                    self._shape_disk_cache[cache_key])
+            else:
+                level = build_shape_level(theme, index, diff)
+                self._level_cache[key] = level
+                self._shape_disk_cache[cache_key] = level_to_data(level)
+                self._save_shape_cache()
         level = self._level_cache[key]
         prefix = {"fruit": "f_", "animal": "a_"}[theme]
         checkpoint = self.get_checkpoint(f"{prefix}{index}:{diff}")
@@ -2358,8 +2399,8 @@ class App:
     def _is_unlocked(self, theme, i):
         if theme == THEME_DEFAULT:
             return i + 1 <= self.save.get("unlocked", 1)
-        key = "fruit_unlocked" if theme == THEME_FRUIT else "animal_unlocked"
-        return i + 1 <= self.save.get(key, 1)
+        # 水果/动物主题全解锁，用户自由选择
+        return True
 
     # ---------- 绘制分发 ----------
     def _day_progress(self):
@@ -2512,7 +2553,7 @@ class App:
                 meta = metas[i]
                 self._draw_card_shape(meta, rect, offset)
                 level_name = meta["name"]
-                name = get_font(22).render(level_name, True, WHITE)
+                name = get_font(26).render(level_name, True, (40, 30, 56))
                 self.screen.blit(name, name.get_rect(
                     center=(rect.centerx, rect.y + 130 + offset)))
                 star_key_prefix = "f_" if theme == THEME_FRUIT else "a_"

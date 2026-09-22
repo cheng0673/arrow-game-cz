@@ -217,7 +217,10 @@ def reverse_generate_masked(rows: int, cols: int,
             if not full:
                 break
             max_block = max(item[0] for item in full)
-            if max_block > 0 and rng.random() < 0.75:
+            # 「最深优先」偏好会大幅压缩可解顺序的搜索空间，
+            # 高密度关卡（困难档 ≥80%）必须放宽，否则贪心几乎必然失败
+            if (count * 5 <= len(active) * 4 and max_block > 0
+                    and rng.random() < 0.75):
                 pool = [item for item in full if item[0] >= max(1, max_block - 1)]
             else:
                 pool = full
@@ -237,7 +240,35 @@ def reverse_generate_masked(rows: int, cols: int,
                 best = placed
 
     if best is None:
-        raise RuntimeError(f"无法在异形棋盘上生成 {count} 支箭的关卡")
+        # 保底构造：随机抽取 count 个格子，按「列从右到左、列内自下而上」
+        # 放置——放置每个格子时，其 ← 射线经过的格子必然尚未放置，
+        # 因此任意密度都必定成功；方向仍按阻挡数偏好挑选，难度不缩水。
+        order = rng.sample(sorted(active), min(count, len(active)))
+        order.sort(key=lambda rc: (-rc[1], -rc[0]))
+        occupied = set()
+        placed = []
+        blocked_by: dict[tuple[int, int], int] = {}
+        for r, c in order:
+            full = []
+            for d in dirs:
+                if _ray_clear(occupied, rows, cols, r, c, d):
+                    full.append((blocked_by.get((r, c), 0), r, c, d))
+            if not full:  # 理论上不会发生（← 必畅通），保险跳过
+                continue
+            max_block = max(item[0] for item in full)
+            if max_block > 0 and rng.random() < 0.75:
+                pool = [item for item in full if item[0] >= max(1, max_block - 1)]
+            else:
+                pool = full
+            _, r, c, d = rng.choice(pool)
+            placed.append((r, c, d))
+            occupied.add((r, c))
+            nr, nc = r + d.dr, c + d.dc
+            while 0 <= nr < rows and 0 <= nc < cols:
+                blocked_by[(nr, nc)] = blocked_by.get((nr, nc), 0) + 1
+                nr += d.dr
+                nc += d.dc
+        return placed
     return best
 
 
@@ -423,18 +454,16 @@ FRUIT_PATTERNS = [
     ("苹果", """
 ......b......
 .....gbg.....
-.....###.....
-....#####....
-...#######...
+....##.##....
 ..#########..
+.###########.
 .###########.
 #############
 #############
 .###########.
+.###########.
 ..#########..
-...#######...
 ....#####....
-.....###.....
 """, (238, 64, 78)),
     ("草莓", """
 ..g...d...g..
@@ -467,14 +496,20 @@ FRUIT_PATTERNS = [
 ....gggg
 """, (86, 196, 108)),
     ("葡萄", """
-.....gb......
-.....gb......
-.##..##..##..
-.##########..
-..########..
-...######....
-....####.....
-.....##......
+......b......
+..ggggbgggg..
+.gggggbggggg.
+..ggggbgggg..
+......b......
+.###.###.###.
+.###.###.###.
+.###.###.###.
+...###.###...
+...###.###...
+...###.###...
+.....###.....
+.....###.....
+.....###.....
 """, (156, 108, 224)),
     ("樱桃", """
 ....bbb
@@ -611,13 +646,12 @@ def build_shape_level(theme: str, index: int, diff: int) -> dict:
     target = round(len(playable) * ratio)
     arrows = None
     theme_seed = 777 if theme == "fruit" else 1453
-    for count in (target, target - 2, target - 4, target - 6):
-        if count < 4:
-            break
+    for count in range(target, max(3, target - 5), -2):
         try:
             arrows = reverse_generate_masked(
                 rows, cols, playable, count,
-                seed=3001 * (index + 1) + 503 * (diff + 1) + theme_seed)
+                seed=3001 * (index + 1) + 503 * (diff + 1) + theme_seed,
+                attempts=80)
             break
         except RuntimeError:
             continue
